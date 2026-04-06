@@ -245,7 +245,16 @@ def main() -> None:
         st.warning("No data for this locus/trait combination.")
         return
 
-    df = load_locus(match[0]["path"])
+    try:
+        df = load_locus(match[0]["path"])
+    except Exception as exc:
+        st.error(f"Failed to load {match[0]['path']}: {exc}")
+        return
+
+    if df.empty:
+        st.warning("Parquet loaded but contains no variants.")
+        return
+
     paper_info = _PAPER_LEADS.get(selected_name, {})
     paper_lead_rsid = paper_info.get("rsid", "")
 

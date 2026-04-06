@@ -53,6 +53,24 @@ The dashboard provides a three-panel view for each locus:
 - **Summary panel** — CS size, top PIP/SNP, convergence status, credible
   set variant table, and full locus data expander
 
+## Deployment (Streamlit Community Cloud)
+
+The app is ready for one-click deployment on [share.streamlit.io](https://share.streamlit.io):
+
+1. Push this repo to GitHub (the `data/finemap/*.parquet` files are
+   tracked in git and included in the repo).
+2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in
+   with GitHub.
+3. Click **New app** and fill in:
+   - **Repository:** `<your-username>/gwasvis`
+   - **Branch:** `main` (or your feature branch)
+   - **Main file path:** `pd-progression-finemap/app/streamlit_app.py`
+4. Click **Deploy**. Streamlit Cloud reads `requirements.txt` for
+   dependencies and `.streamlit/config.toml` for theme settings.
+
+The finemap parquets (~230 KB total) are committed to the repo so the
+app works immediately without running the pipeline.
+
 ## Tests
 
 ```bash

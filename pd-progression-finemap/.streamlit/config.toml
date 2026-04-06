@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#4A90D9"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[ui]
+hideTopBar = false

@@ -1,5 +1,7 @@
-data/
-*.parquet
+data/raw/
+data/loci/
+data/ld/
+!data/finemap/
 *.ld
 __pycache__/
 *.pyc

@@ -1,0 +1,8 @@
+locus,trait,n_variants,n_credible_sets,cs_size,top_pip,top_rsid,paper_lead_rsid,paper_lead_in_cs,converged
+APOE,mortality,600,2,1,1.0,rs429358,rs429358,True,True
+TBXAS1,mortality,600,3,1,1.0,rs_sim_TBXAS1_133,rs4726467,True,True
+SYT10,mortality,600,3,1,1.0,rs_sim_SYT10_85,rs10437796,False,True
+MORN1,hy3,600,1,1,0.9984,rs_sim_MORN1_301,rs115217673,False,True
+ASNS,hy3,600,1,1,0.9713,rs_sim_ASNS_301,rs145274312,False,True
+PDE5A,hy3,600,1,1,1.0,rs113120976,rs113120976,True,True
+XPO1,hy3,600,5,1,1.0,rs_sim_XPO1_26,rs141421624,True,True
