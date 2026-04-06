@@ -343,6 +343,8 @@ def finemap_locus(locus_name: str, trait: str, L: int = 10) -> pd.DataFrame:
             out.loc[out.index[var_idx], "in_cs"] = True
             out.loc[out.index[var_idx], "cs_id"] = cs_idx
 
+    out["converged"] = result["converged"]
+
     # -- Save -----------------------------------------------------------------
     FINEMAP_DIR.mkdir(parents=True, exist_ok=True)
     out_path = FINEMAP_DIR / f"{locus_name}_{trait}.parquet"
@@ -382,6 +384,34 @@ def finemap_locus(locus_name: str, trait: str, L: int = 10) -> pd.DataFrame:
     return out
 
 
+def finemap_all(L: int = 10) -> list[Path]:
+    """Fine-map every locus defined in :data:`LOCI`.
+
+    Returns a list of output parquet paths (one per successfully processed locus).
+    """
+    FINEMAP_DIR.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    for locus in LOCI:
+        name, trait = locus["name"], locus["trait"]
+        parquet = LOCI_DIR / f"{name}_{trait}.parquet"
+        if not parquet.exists():
+            print(f"  ! {name}_{trait}: locus parquet not found, skipping")
+            continue
+        print(f"\n{'='*60}")
+        print(f"  {name} ({trait})")
+        print(f"{'='*60}")
+        try:
+            finemap_locus(name, trait, L=L)
+            written.append(FINEMAP_DIR / f"{name}_{trait}.parquet")
+        except Exception as exc:
+            logger.error("Failed for %s_%s: %s", name, trait, exc)
+            print(f"  ERROR: {exc}")
+
+    print(f"\nDone — {len(written)} locus parquets in {FINEMAP_DIR}")
+    return written
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -403,20 +433,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.all:
-        for locus in LOCI:
-            name, trait = locus["name"], locus["trait"]
-            parquet = LOCI_DIR / f"{name}_{trait}.parquet"
-            if not parquet.exists():
-                print(f"  ! {name}_{trait}: locus parquet not found, skipping")
-                continue
-            print(f"\n{'='*60}")
-            print(f"  {name} ({trait})")
-            print(f"{'='*60}")
-            try:
-                finemap_locus(name, trait, L=args.L)
-            except Exception as exc:
-                logger.error("Failed for %s_%s: %s", name, trait, exc)
-                print(f"  ERROR: {exc}")
+        finemap_all(L=args.L)
         sys.exit(0)
 
     if args.locus and args.trait:
