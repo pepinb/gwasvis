@@ -32,12 +32,27 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 
-from src.ld import build_locus_ld, LD_DIR
+from src.ld import build_locus_ld, build_locus_ld_from_vcf, LD_DIR, REF_DIR
 from src.loci import LOCI, LOCI_DIR
 
 logger = logging.getLogger(__name__)
 
 FINEMAP_DIR = Path(__file__).resolve().parent.parent / "data" / "finemap"
+
+# Per-locus maximum causal effects (L) based on Tan et al. (2024).
+# APOE has a confirmed second weak signal; all other loci are single-signal.
+# Over-specifying L causes SuSiE to overfit noise, collapsing the true
+# signal's PIP to zero (see scripts/debug_apoe.py for the L-sensitivity
+# analysis).  Default to L=1 for unlisted loci.
+LOCUS_L: dict[tuple[str, str], int] = {
+    ("APOE", "mortality"): 2,
+    ("TBXAS1", "mortality"): 1,
+    ("SYT10", "mortality"): 1,
+    ("MORN1", "hy3"): 1,
+    ("ASNS", "hy3"): 1,
+    ("PDE5A", "hy3"): 1,
+    ("XPO1", "hy3"): 1,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +303,7 @@ def run_susie(
 # Locus-level wrapper
 # ---------------------------------------------------------------------------
 
-def finemap_locus(locus_name: str, trait: str, L: int = 10) -> pd.DataFrame:
+def finemap_locus(locus_name: str, trait: str, L: int | None = None) -> pd.DataFrame:
     """Fine-map a single locus end-to-end.
 
     1. Build / load the aligned LD matrix via ``build_locus_ld``.
@@ -296,10 +311,17 @@ def finemap_locus(locus_name: str, trait: str, L: int = 10) -> pd.DataFrame:
     3. Annotate the sumstats with PIP, in_cs, cs_id.
     4. Save to ``data/finemap/{locus_name}_{trait}.parquet``.
 
+    Parameters
+    ----------
+    L : max causal effects. If *None*, uses :data:`LOCUS_L` (default 1).
+
     Returns
     -------
     pd.DataFrame  — aligned sumstats with PIP / CS annotations.
     """
+    if L is None:
+        L = LOCUS_L.get((locus_name, trait), 1)
+
     # Load LD (may build from plink2 if not cached)
     aligned_path = LD_DIR / f"{locus_name}_{trait}.aligned.parquet"
     ld_path = LD_DIR / f"{locus_name}_{trait}.ld"
@@ -311,7 +333,13 @@ def finemap_locus(locus_name: str, trait: str, L: int = 10) -> pd.DataFrame:
         ld_matrix = np.loadtxt(ld_path, dtype=np.float64)
         snp_order = snplist_path.read_text().strip().split("\n")
     else:
-        sumstats, ld_matrix, snp_order = build_locus_ld(locus_name, trait)
+        # Use full reference if available, otherwise stream from 1KG VCFs
+        ref_pgen = REF_DIR / "1kg_eur_hg19.pgen"
+        if ref_pgen.exists():
+            sumstats, ld_matrix, snp_order = build_locus_ld(locus_name, trait)
+        else:
+            logger.info("Full 1KG reference not found — using VCF streaming")
+            sumstats, ld_matrix, snp_order = build_locus_ld_from_vcf(locus_name, trait)
 
     # Effective sample size from the sumstats
     if "n" in sumstats.columns:
@@ -384,9 +412,10 @@ def finemap_locus(locus_name: str, trait: str, L: int = 10) -> pd.DataFrame:
     return out
 
 
-def finemap_all(L: int = 10) -> list[Path]:
+def finemap_all() -> list[Path]:
     """Fine-map every locus defined in :data:`LOCI`.
 
+    Uses per-locus L from :data:`LOCUS_L` (default 1).
     Returns a list of output parquet paths (one per successfully processed locus).
     """
     FINEMAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -394,12 +423,13 @@ def finemap_all(L: int = 10) -> list[Path]:
 
     for locus in LOCI:
         name, trait = locus["name"], locus["trait"]
+        L = LOCUS_L.get((name, trait), 1)
         parquet = LOCI_DIR / f"{name}_{trait}.parquet"
         if not parquet.exists():
             print(f"  ! {name}_{trait}: locus parquet not found, skipping")
             continue
         print(f"\n{'='*60}")
-        print(f"  {name} ({trait})")
+        print(f"  {name} ({trait})  [L={L}]")
         print(f"{'='*60}")
         try:
             finemap_locus(name, trait, L=L)
@@ -428,12 +458,12 @@ def main() -> None:
     )
     parser.add_argument("--locus", type=str, help="Locus name (e.g. APOE).")
     parser.add_argument("--trait", type=str, help="Trait (mortality or hy3).")
-    parser.add_argument("--L", type=int, default=10, help="Max causal effects (default: 10).")
+    parser.add_argument("--L", type=int, default=None, help="Max causal effects (default: per-locus from LOCUS_L).")
     parser.add_argument("--all", action="store_true", help="Fine-map all loci.")
     args = parser.parse_args()
 
     if args.all:
-        finemap_all(L=args.L)
+        finemap_all()
         sys.exit(0)
 
     if args.locus and args.trait:

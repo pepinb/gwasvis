@@ -40,12 +40,13 @@ class LeadSNP:
     pos: int       # hg19 / GRCh37
     gene: str
     pval: float    # published p-value
+    chrpos: str | None = None  # chr:pos string for files without rsids
 
 
 MORTALITY_LEADS = [
-    LeadSNP("rs429358",   "19", 45411941, "APOE",   1.4e-10),
-    LeadSNP("rs4726467",  "7",  139563129, "TBXAS1", 7.7e-10),
-    LeadSNP("rs10437796", "12", 33586576, "SYT10",  5.3e-08),
+    LeadSNP("rs429358",   "19", 45411941,  "APOE",   1.4e-10, "19:45411941"),
+    LeadSNP("rs4726467",  "7",  139637422, "TBXAS1", 7.7e-10, "7:139637422"),
+    LeadSNP("rs10437796", "12", 33635494,  "SYT10",  5.3e-08, "12:33635494"),
 ]
 
 HY3_LEADS = [
@@ -81,19 +82,24 @@ def _parse_chrpos_marker(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _find_snp(df: pd.DataFrame, snp: LeadSNP) -> pd.Series | None:
-    """Look up a lead SNP by rsid first, then by chr:pos."""
-    # Strategy 1: exact rsid match
+    """Look up a lead SNP by rsid first, then by chr:pos string, then by chr + pos columns."""
     if "rsid" in df.columns:
+        # Strategy 1: exact rsid match
         mask = df["rsid"] == snp.rsid
         if mask.any():
             return df.loc[mask].iloc[0]
-        # The mortality file may have chr:pos in the rsid column
+        # Strategy 2: explicit chrpos string (for mortality files with chr:pos markers)
+        if snp.chrpos:
+            mask = df["rsid"] == snp.chrpos
+            if mask.any():
+                return df.loc[mask].iloc[0]
+        # Strategy 3: construct chr:pos from snp fields
         chrpos = f"{snp.chr}:{snp.pos}"
         mask = df["rsid"] == chrpos
         if mask.any():
             return df.loc[mask].iloc[0]
 
-    # Strategy 2: match by chr + pos columns
+    # Strategy 4: match by chr + pos columns
     if "chr" in df.columns and "pos" in df.columns:
         mask = (df["chr"].astype(str) == str(snp.chr)) & (df["pos"] == snp.pos)
         if mask.any():
@@ -136,7 +142,13 @@ def _assert_pval_within_order_of_magnitude(observed: float, expected: float, snp
 
 @pytest.fixture(scope="module")
 def mortality_df() -> pd.DataFrame:
-    path = _find_file("*MORTALITY*META*.tbl") or _find_file("*mortality*meta*.tbl")
+    path = (
+        _find_file("*mortality*summaryStats*")
+        or _find_file("*mortality*sumstats*")
+        or _find_file("*MORTALITY*META*.tbl")
+        or _find_file("*mortality*meta*.tbl")
+        or _find_file("*mortality*")
+    )
     if path is None:
         pytest.skip(
             f"Mortality summary stats not found in {DATA_DIR}. "
@@ -149,7 +161,14 @@ def mortality_df() -> pd.DataFrame:
 
 @pytest.fixture(scope="module")
 def hy3_df() -> pd.DataFrame:
-    path = _find_file("*HY3*META*.tbl") or _find_file("*hy3*meta*.tbl")
+    path = (
+        _find_file("*HY3*summaryStats*")
+        or _find_file("*HY3*sumstats*")
+        or _find_file("*HY3*META*.tbl")
+        or _find_file("*hy3*meta*.tbl")
+        or _find_file("*HY3*")
+        or _find_file("*hy3*")
+    )
     if path is None:
         pytest.skip(
             f"HY3+ summary stats not found in {DATA_DIR}. "

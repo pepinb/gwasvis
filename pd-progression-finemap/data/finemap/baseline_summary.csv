@@ -1,8 +1,8 @@
-locus,trait,n_variants,n_credible_sets,cs_size,top_pip,top_rsid,paper_lead_rsid,paper_lead_in_cs,converged
-APOE,mortality,600,2,1,1.0,rs429358,rs429358,True,True
-TBXAS1,mortality,600,3,1,1.0,rs_sim_TBXAS1_133,rs4726467,True,True
-SYT10,mortality,600,3,1,1.0,rs_sim_SYT10_85,rs10437796,False,True
-MORN1,hy3,600,1,1,0.9984,rs_sim_MORN1_301,rs115217673,False,True
-ASNS,hy3,600,1,1,0.9713,rs_sim_ASNS_301,rs145274312,False,True
-PDE5A,hy3,600,1,1,1.0,rs113120976,rs113120976,True,True
-XPO1,hy3,600,5,1,1.0,rs_sim_XPO1_26,rs141421624,True,True
+locus,trait,n_vars,L,converged,top_pip,top_variant,cs_size,paper_lead_in_cs,paper_lead_pip
+APOE,mortality,2409,2,True,0.8605,19:45411941,2,True,0.8605
+TBXAS1,mortality,2063,1,True,0.554,7:139637422,4,True,0.554
+SYT10,mortality,2320,1,True,0.1039,12:33635494,0,False,0.1039
+MORN1,hy3,1813,1,True,0.5689,rs115217673,4,True,0.5689
+ASNS,hy3,2255,1,True,0.0306,rs12669058,0,False,
+PDE5A,hy3,2178,1,True,0.9842,rs113120976,1,True,0.9842
+XPO1,hy3,1692,1,True,0.8348,rs141421624,4,True,0.8348

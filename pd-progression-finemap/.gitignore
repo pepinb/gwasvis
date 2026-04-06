@@ -1,8 +1,10 @@
 data/raw/
 data/loci/
 data/ld/
+data/cache/
 !data/finemap/
 *.ld
+*.tbi
 __pycache__/
 *.pyc
 .venv/

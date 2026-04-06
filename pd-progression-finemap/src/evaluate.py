@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.finemap import LOCUS_L
 from src.loci import LOCI
 
 logger = logging.getLogger(__name__)
@@ -27,13 +28,43 @@ _PAPER_LEADS: dict[tuple[str, str], str] = {
     (loc["name"], loc["trait"]): loc["lead_rsid"] for loc in LOCI
 }
 
+# Also look up by chr:pos for mortality loci
+_PAPER_LEAD_CHRPOS: dict[tuple[str, str], str] = {
+    (loc["name"], loc["trait"]): loc.get("lead_chrpos", f"{loc['chr']}:{loc['lead_bp']}")
+    for loc in LOCI
+}
+
+
+def _find_paper_lead(df: pd.DataFrame, name: str, trait: str) -> pd.Series | None:
+    """Look up the paper's lead SNP by rsid first, then by chr:pos."""
+    key = (name, trait)
+    # Try rsid
+    rsid = _PAPER_LEADS.get(key)
+    if rsid and "rsid" in df.columns:
+        rows = df[df["rsid"] == rsid]
+        if not rows.empty:
+            return rows.iloc[0]
+    # Try chr:pos
+    chrpos = _PAPER_LEAD_CHRPOS.get(key)
+    if chrpos and "rsid" in df.columns:
+        rows = df[df["rsid"] == chrpos]
+        if not rows.empty:
+            return rows.iloc[0]
+    # Try by position
+    locus_def = next((l for l in LOCI if l["name"] == name and l["trait"] == trait), None)
+    if locus_def and "pos" in df.columns:
+        rows = df[df["pos"] == locus_def["lead_bp"]]
+        if not rows.empty:
+            return rows.iloc[0]
+    return None
+
 
 def summarize_finemap() -> pd.DataFrame:
     """Load all fine-mapping parquets and build a summary table.
 
     Columns:
-        locus, trait, n_variants, n_credible_sets, cs_size,
-        top_pip, top_rsid, paper_lead_rsid, paper_lead_in_cs, converged
+        locus, trait, n_vars, L, converged, top_pip, top_variant,
+        cs_size, paper_lead_in_cs, paper_lead_pip
 
     The table is saved to ``data/finemap/baseline_summary.csv`` and
     returned as a DataFrame.
@@ -43,21 +74,15 @@ def summarize_finemap() -> pd.DataFrame:
     for locus in LOCI:
         name = locus["name"]
         trait = locus["trait"]
+        L = LOCUS_L.get((name, trait), 1)
         path = FINEMAP_DIR / f"{name}_{trait}.parquet"
 
         if not path.exists():
             logger.warning("No finemap result for %s_%s", name, trait)
             rows.append({
-                "locus": name,
-                "trait": trait,
-                "n_variants": None,
-                "n_credible_sets": None,
-                "cs_size": None,
-                "top_pip": None,
-                "top_rsid": None,
-                "paper_lead_rsid": locus["lead_rsid"],
-                "paper_lead_in_cs": None,
-                "converged": None,
+                "locus": name, "trait": trait, "n_vars": None, "L": L,
+                "converged": None, "top_pip": None, "top_variant": None,
+                "cs_size": None, "paper_lead_in_cs": None, "paper_lead_pip": None,
             })
             continue
 
@@ -72,30 +97,30 @@ def summarize_finemap() -> pd.DataFrame:
         # Top PIP variant
         top_idx = df["pip"].idxmax()
         top_pip = float(df.loc[top_idx, "pip"])
-        top_rsid = str(df.loc[top_idx, "rsid"]) if "rsid" in df.columns else "?"
+        top_variant = str(df.loc[top_idx, "rsid"]) if "rsid" in df.columns else "?"
 
         # Paper lead SNP
-        paper_rsid = _PAPER_LEADS.get((name, trait), "?")
-        paper_in_cs = False
-        if "rsid" in df.columns:
-            lead_rows = df[df["rsid"] == paper_rsid]
-            if not lead_rows.empty:
-                paper_in_cs = bool(lead_rows.iloc[0]["in_cs"])
+        lead_row = _find_paper_lead(df, name, trait)
+        if lead_row is not None:
+            paper_in_cs = bool(lead_row["in_cs"])
+            paper_lead_pip = round(float(lead_row["pip"]), 4)
+        else:
+            paper_in_cs = False
+            paper_lead_pip = None
 
-        # Convergence flag (stored per-row, but uniform within a locus)
         converged = bool(df["converged"].iloc[0]) if "converged" in df.columns else None
 
         rows.append({
             "locus": name,
             "trait": trait,
-            "n_variants": n_variants,
-            "n_credible_sets": n_cs,
-            "cs_size": cs_size,
-            "top_pip": round(top_pip, 4),
-            "top_rsid": top_rsid,
-            "paper_lead_rsid": paper_rsid,
-            "paper_lead_in_cs": paper_in_cs,
+            "n_vars": n_variants,
+            "L": L,
             "converged": converged,
+            "top_pip": round(top_pip, 4),
+            "top_variant": top_variant,
+            "cs_size": cs_size,
+            "paper_lead_in_cs": paper_in_cs,
+            "paper_lead_pip": paper_lead_pip,
         })
 
     summary = pd.DataFrame(rows)

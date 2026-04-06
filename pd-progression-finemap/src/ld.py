@@ -43,6 +43,10 @@ _1KG_FILES = {
     "phase3_corrected.psam": "https://www.dropbox.com/s/yozrzsdrwqej63q/phase3_corrected.psam?dl=1",
 }
 
+# 1KG Phase 3 VCFs on EBI FTP (tabix-indexed, can stream regions via bcftools)
+_1KG_VCF_BASE = "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502"
+_1KG_PANEL_URL = f"{_1KG_VCF_BASE}/integrated_call_samples_v3.20130502.ALL.panel"
+
 # Ambiguous-strand allele pairs (complement is the same pair)
 _AMBIGUOUS_PAIRS = frozenset({("A", "T"), ("T", "A"), ("C", "G"), ("G", "C")})
 
@@ -105,6 +109,251 @@ def _stream_download(url: str, dest: Path) -> None:
                     flush=True,
                 )
     print()
+
+
+def _bcftools_path() -> str:
+    """Return the bcftools binary path, or exit with install instructions."""
+    path = shutil.which("bcftools")
+    if path is None:
+        print(
+            "\n  bcftools is not installed or not on $PATH.\n"
+            "\n"
+            "  Install instructions:\n"
+            "    macOS (Homebrew):  brew install bcftools\n"
+            "    Ubuntu / Debian:   sudo apt-get install bcftools\n"
+            "    Conda:             conda install -c bioconda bcftools\n",
+        )
+        sys.exit(1)
+    return path
+
+
+def _get_eur_samples() -> list[str]:
+    """Download the 1KG panel file and return EUR sample IDs."""
+    import requests
+    panel_path = REF_DIR / "1kg_panel.txt"
+    if not panel_path.exists():
+        REF_DIR.mkdir(parents=True, exist_ok=True)
+        resp = requests.get(_1KG_PANEL_URL, timeout=60)
+        resp.raise_for_status()
+        panel_path.write_text(resp.text)
+    df = pd.read_csv(panel_path, sep="\t")
+    return df.loc[df["super_pop"] == "EUR", "sample"].tolist()
+
+
+def _extract_region_vcf(chrom: str, start: int, end: int, out_vcf: Path) -> None:
+    """Use bcftools to stream a region from the remote 1KG VCF."""
+    bcftools = _bcftools_path()
+    vcf_url = f"{_1KG_VCF_BASE}/ALL.chr{chrom}.phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz"
+    region = f"{chrom}:{start}-{end}"
+
+    logger.info("Extracting region %s from remote 1KG VCF", region)
+    cmd = [
+        bcftools, "view",
+        "--regions", region,
+        "--types", "snps",
+        "--min-alleles", "2",
+        "--max-alleles", "2",
+        "-O", "z",
+        "-o", str(out_vcf),
+        vcf_url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"bcftools failed:\n{result.stderr}")
+    # Index the output
+    subprocess.run(["bcftools", "index", str(out_vcf)], check=True, capture_output=True)
+
+
+def build_locus_ld_from_vcf(
+    locus_name: str,
+    trait: str,
+    window: int = 500_000,
+) -> tuple[pd.DataFrame, np.ndarray, list[str]]:
+    """Build LD matrix for a locus using remote 1KG VCFs via bcftools.
+
+    This is an alternative to build_locus_ld() that doesn't require
+    downloading the full 1KG pgen reference. It streams just the
+    region we need from EBI FTP.
+    """
+    from src.loci import LOCI, LOCI_DIR
+
+    plink2 = _plink2_path()
+    bcftools = _bcftools_path()
+
+    # Load locus sumstats
+    sumstats = _load_locus_sumstats(locus_name, trait)
+    logger.info("Locus %s_%s: %d variants in sumstats", locus_name, trait, len(sumstats))
+
+    # Find locus definition for the region bounds
+    locus = None
+    for loc in LOCI:
+        if loc["name"] == locus_name and loc["trait"] == trait:
+            locus = loc
+            break
+    if locus is None:
+        raise ValueError(f"Unknown locus: {locus_name}_{trait}")
+
+    chrom = str(locus["chr"])
+    start = max(1, locus["lead_bp"] - window)
+    end = locus["lead_bp"] + window
+
+    # Note: ambiguous-strand SNPs are handled inside harmonize_alleles()
+
+    with tempfile.TemporaryDirectory(prefix="ld_vcf_") as tmpdir:
+        tmp = Path(tmpdir)
+
+        # Step 1: Get EUR sample list
+        eur_samples = _get_eur_samples()
+        keep_file = tmp / "eur_samples.txt"
+        keep_file.write_text("\n".join(eur_samples) + "\n")
+        print(f"    EUR samples: {len(eur_samples)}")
+
+        # Step 2: Extract region from remote VCF, filter to EUR, biallelic SNPs
+        region_vcf = tmp / "region.vcf.gz"
+        print(f"    Streaming chr{chrom}:{start:,}-{end:,} from 1KG EBI FTP…")
+        _extract_region_vcf(chrom, start, end, region_vcf)
+
+        # Step 3: Filter to EUR samples only
+        eur_vcf = tmp / "region_eur.vcf.gz"
+        cmd = [
+            bcftools, "view",
+            "--samples-file", str(keep_file),
+            "--min-ac", "1",  # drop monomorphic in EUR
+            "-O", "z",
+            "-o", str(eur_vcf),
+            str(region_vcf),
+        ]
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+        # Step 4: Convert to plink2 format
+        # Use chr:pos:ref:alt as variant ID since 1KG VCFs lack rsids
+        plink_prefix = tmp / "region_eur"
+        _run_plink2(
+            [
+                "--vcf", str(eur_vcf),
+                "--maf", "0.01",
+                "--snps-only",
+                "--set-all-var-ids", "@:#:$r:$a",
+                "--make-pgen",
+                "--out", str(plink_prefix),
+            ],
+            description=f"convert VCF to plink2 for {locus_name}",
+        )
+
+        # Step 5: Read pvar to build position-based lookups
+        # Variant IDs in pvar are now chr:pos:ref:alt (set by --set-all-var-ids)
+        pvar_path = plink_prefix.with_suffix(".pvar")
+        pvar = pd.read_csv(pvar_path, sep="\t", comment="#",
+                           names=["chr", "pos", "varid", "ref", "alt"],
+                           usecols=[0, 1, 2, 3, 4], dtype=str)
+        pvar["chr"] = pvar["chr"].astype(str)
+
+        # Build position→(ref, alt) lookup for harmonize_alleles
+        pvar_alleles: dict[str, tuple[str, str]] = {}
+        pvar_varid_by_pos: dict[str, str] = {}
+        for _, prow in pvar.iterrows():
+            pk = f"{prow['chr']}:{prow['pos']}"
+            pvar_alleles[pk] = (prow["ref"], prow["alt"])
+            pvar_varid_by_pos[pk] = prow["varid"]
+
+        # Find overlapping variants by position for --extract
+        sumstats_pos_keys = (
+            sumstats["chr"].astype(str) + ":" + sumstats["pos"].astype(int).astype(str)
+        ).values
+        extract_varids = []
+        for pk in sumstats_pos_keys:
+            varid = pvar_varid_by_pos.get(pk)
+            if varid:
+                extract_varids.append(varid)
+        extract_varids_set = set(extract_varids)
+        logger.info("Position-based matching: %d sumstats → %d in 1KG ref",
+                     len(sumstats), len(extract_varids_set))
+
+        if not extract_varids_set:
+            raise ValueError(f"No overlapping variants for {locus_name}_{trait}")
+
+        snp_list = tmp / "snps.txt"
+        snp_list.write_text("\n".join(sorted(extract_varids_set)))
+        print(f"    Variants overlapping with 1KG: {len(extract_varids_set)}")
+
+        # Step 6: Run plink2 to compute LD
+        ld_prefix = tmp / "ld_out"
+        _run_plink2(
+            [
+                "--pfile", str(plink_prefix),
+                "--extract", str(snp_list),
+                "--r-unphased", "square",
+                "--out", str(ld_prefix),
+            ],
+            description=f"LD matrix for {locus_name}_{trait}",
+        )
+
+        # Step 7: Read LD output
+        vcor_file = ld_prefix.with_suffix(".unphased.vcor1")
+        vars_file = Path(str(vcor_file) + ".vars")
+
+        if not vcor_file.exists():
+            vcor_candidates = list(tmp.glob("ld_out*.vcor*"))
+            vars_candidates = list(tmp.glob("ld_out*.vars"))
+            if not vcor_candidates:
+                raise FileNotFoundError(f"plink2 LD output not found in {tmpdir}")
+            vcor_file = vcor_candidates[0]
+            vars_file = vars_candidates[0] if vars_candidates else None
+
+        ld_raw = np.loadtxt(vcor_file, dtype=np.float64)
+        if ld_raw.ndim == 1:
+            ld_raw = ld_raw.reshape(1, 1)
+
+        if vars_file and vars_file.exists():
+            ref_snps = vars_file.read_text().strip().split("\n")
+        else:
+            raise FileNotFoundError("No .vars file — cannot determine SNP order")
+
+    # Step 8: Harmonize alleles using the shared function
+    # ref_snps has IDs like "19:45411941:T:C" — parse to build allele lookup
+    ref_alleles_by_pos: dict[str, tuple[str, str]] = {}
+    for varid in ref_snps:
+        parts = varid.split(":")
+        if len(parts) >= 4:
+            pk = f"{parts[0]}:{parts[1]}"
+            ref_alleles_by_pos[pk] = (parts[2], parts[3])
+
+    aligned_ss, ld_sub, snp_order, report = harmonize_alleles(
+        sumstats, ref_snps, ref_alleles_by_pos, ld_raw, match_by="pos",
+    )
+
+    logger.info(
+        "Allele harmonization: %d keep, %d flipped, %d ambig, %d mismatch, %d not in ref",
+        report["n_keep"], report["n_flip"], report["n_ambiguous_dropped"],
+        report["n_mismatch_dropped"], report["n_not_in_ref"],
+    )
+    print(
+        f"    Alleles: {report['n_keep']} keep, {report['n_flip']} flipped, "
+        f"{report['n_ambiguous_dropped']} ambig, {report['n_mismatch_dropped']} mismatch, "
+        f"{report['n_not_in_ref']} not in ref"
+    )
+
+    if report["n_final"] == 0:
+        raise ValueError(f"No overlapping SNPs for {locus_name}_{trait}")
+
+    # Save outputs
+    LD_DIR.mkdir(parents=True, exist_ok=True)
+    ld_out = LD_DIR / f"{locus_name}_{trait}.ld"
+    np.savetxt(ld_out, ld_sub, fmt="%.6f", delimiter="\t")
+
+    snp_out = LD_DIR / f"{locus_name}_{trait}.snplist"
+    snp_out.write_text("\n".join(snp_order) + "\n")
+
+    ss_out = LD_DIR / f"{locus_name}_{trait}.aligned.parquet"
+    aligned_ss.to_parquet(ss_out, index=False)
+
+    assert len(aligned_ss) == ld_sub.shape[0] == ld_sub.shape[1]
+
+    print(
+        f"    LD matrix: {ld_sub.shape[0]} x {ld_sub.shape[1]} → {ld_out.name}"
+    )
+
+    return aligned_ss, ld_sub, snp_order
 
 
 def download_1kg_eur() -> Path:
@@ -204,20 +453,156 @@ def _is_ambiguous(a1: str, a2: str) -> bool:
     return (a1.upper(), a2.upper()) in _AMBIGUOUS_PAIRS
 
 
-def _alleles_match(sum_a1: str, sum_a2: str, ref_a1: str, ref_a2: str) -> str:
-    """Compare sumstats alleles to reference. Returns 'match', 'flip', or 'drop'.
+def _classify_alleles(
+    sum_a1: str, sum_a2: str, vcf_ref: str, vcf_alt: str,
+) -> str:
+    """Classify the allele relationship between sumstats and VCF reference.
 
-    'match' — same orientation (a1/a2 agree).
-    'flip'  — alleles are swapped: sumstats a1 == ref a2 and vice versa.
+    plink2 LD is computed on ALT allele dosages, so z-scores must be
+    oriented to the ALT allele for SuSiE-RSS.
+
+    Returns
+    -------
+    'keep'  — sumstats effect allele (a1) == VCF ALT → z already aligned.
+    'flip'  — sumstats effect allele (a1) == VCF REF → must negate z
+              (and set eaf = 1 - eaf) to align with LD.
     'drop'  — alleles incompatible (tri-allelic, indel mismatch, etc.).
     """
     s1, s2 = sum_a1.upper(), sum_a2.upper()
-    r1, r2 = ref_a1.upper(), ref_a2.upper()
-    if s1 == r1 and s2 == r2:
-        return "match"
-    if s1 == r2 and s2 == r1:
+    ref, alt = vcf_ref.upper(), vcf_alt.upper()
+    if s1 == alt and s2 == ref:
+        # Effect allele == ALT → z already matches LD orientation
+        return "keep"
+    if s1 == ref and s2 == alt:
+        # Effect allele == REF → must flip z to orient to ALT
         return "flip"
     return "drop"
+
+
+def harmonize_alleles(
+    sumstats_df: pd.DataFrame,
+    ref_snps: list[str],
+    ref_alleles: dict[str, tuple[str, str]],
+    ld_raw: np.ndarray,
+    *,
+    match_by: str = "rsid",
+) -> tuple[pd.DataFrame, np.ndarray, list[str], dict]:
+    """Align sumstats z-scores to the LD reference panel allele coding.
+
+    plink2 computes LD correlations based on ALT allele dosages. This
+    function ensures that z-scores are oriented so that the *effect*
+    direction corresponds to the ALT allele in the reference.
+
+    Parameters
+    ----------
+    sumstats_df : DataFrame with columns rsid, chr, pos, a1, a2, beta, se, eaf.
+    ref_snps : ordered list of variant IDs from plink2 .vars file.
+    ref_alleles : mapping of variant key → (VCF REF, VCF ALT).
+        When *match_by* is ``"rsid"``, keys are rsids.
+        When *match_by* is ``"pos"``, keys are ``"chr:pos"`` strings.
+    ld_raw : (n_ref, n_ref) raw LD correlation matrix aligned to *ref_snps*.
+    match_by : ``"rsid"`` or ``"pos"`` — how to join sumstats to reference.
+
+    Returns
+    -------
+    (aligned_df, ld_sub, snp_order, report)
+        aligned_df : subset of sumstats with correct z-scores and eaf.
+        ld_sub : LD submatrix aligned to aligned_df.
+        snp_order : ref variant IDs in the same order.
+        report : dict with counts {n_keep, n_flip, n_ambiguous_dropped,
+                 n_mismatch_dropped, n_indel_dropped, n_not_in_ref, n_final}.
+    """
+    # Build ref index: key → (index_in_ld, ref_allele, alt_allele, varid)
+    ref_idx_map: dict[str, tuple[int, str, str, str]] = {}
+    for idx, varid in enumerate(ref_snps):
+        if match_by == "pos":
+            parts = varid.split(":")
+            if len(parts) >= 2:
+                key = f"{parts[0]}:{parts[1]}"
+            else:
+                continue
+        else:
+            key = varid
+        alleles = ref_alleles.get(key)
+        if alleles:
+            ref_idx_map[key] = (idx, alleles[0], alleles[1], varid)
+
+    keep_rows: list[int] = []
+    keep_ref_idx: list[int] = []
+    flip_positions: list[int] = []
+    n_keep = n_flip = n_ambig = n_mismatch = n_indel = n_not_in_ref = 0
+
+    for i, row in sumstats_df.iterrows():
+        if match_by == "pos":
+            key = f"{row['chr']}:{int(row['pos'])}"
+        else:
+            key = row["rsid"]
+
+        entry = ref_idx_map.get(key)
+        if entry is None:
+            n_not_in_ref += 1
+            continue
+
+        ref_i, vcf_ref, vcf_alt, ref_varid = entry
+        s1, s2 = str(row["a1"]).upper(), str(row["a2"]).upper()
+
+        # Skip indels and multi-allelic
+        if len(s1) > 1 or len(s2) > 1 or len(vcf_ref) > 1 or len(vcf_alt) > 1:
+            n_indel += 1
+            continue
+
+        # Skip ambiguous strand
+        if _is_ambiguous(s1, s2):
+            n_ambig += 1
+            continue
+
+        action = _classify_alleles(s1, s2, vcf_ref, vcf_alt)
+
+        if action == "drop":
+            n_mismatch += 1
+            continue
+
+        keep_rows.append(i)
+        keep_ref_idx.append(ref_i)
+        if action == "flip":
+            flip_positions.append(len(keep_rows) - 1)
+            n_flip += 1
+        else:
+            n_keep += 1
+
+    report = {
+        "n_keep": n_keep,
+        "n_flip": n_flip,
+        "n_ambiguous_dropped": n_ambig,
+        "n_mismatch_dropped": n_mismatch,
+        "n_indel_dropped": n_indel,
+        "n_not_in_ref": n_not_in_ref,
+        "n_final": len(keep_rows),
+    }
+
+    if not keep_rows:
+        return pd.DataFrame(), np.array([]), [], report
+
+    aligned_ss = sumstats_df.iloc[keep_rows].reset_index(drop=True).copy()
+    ld_sub = ld_raw[np.ix_(keep_ref_idx, keep_ref_idx)]
+    snp_order = [ref_snps[j] for j in keep_ref_idx]
+
+    # Compute z-scores
+    z = aligned_ss["beta"].values / aligned_ss["se"].values
+
+    # Flip z-scores AND eaf for variants where effect allele == VCF REF
+    if flip_positions:
+        for pos in flip_positions:
+            z[pos] = -z[pos]
+        if "eaf" in aligned_ss.columns:
+            eaf = aligned_ss["eaf"].values.copy()
+            for pos in flip_positions:
+                eaf[pos] = 1.0 - eaf[pos]
+            aligned_ss["eaf"] = eaf
+
+    aligned_ss["z"] = z
+
+    return aligned_ss, ld_sub, snp_order, report
 
 
 def build_locus_ld(
@@ -252,14 +637,7 @@ def build_locus_ld(
         "Locus %s_%s: %d variants in sumstats", locus_name, trait, len(sumstats)
     )
 
-    # -- Drop ambiguous-strand SNPs from sumstats before extraction -----------
-    ambig_mask = sumstats.apply(
-        lambda r: _is_ambiguous(str(r["a1"]), str(r["a2"])), axis=1
-    )
-    n_ambig = ambig_mask.sum()
-    if n_ambig:
-        logger.info("Dropping %d ambiguous-strand SNPs (A/T or C/G)", n_ambig)
-        sumstats = sumstats.loc[~ambig_mask].reset_index(drop=True)
+    # Note: ambiguous-strand SNPs are handled inside harmonize_alleles()
 
     with tempfile.TemporaryDirectory(prefix="ld_") as tmpdir:
         tmp = Path(tmpdir)
@@ -322,72 +700,33 @@ def build_locus_ld(
     pvar = pd.read_csv(pvar_path, sep="\t", comment="#",
                        names=["chr", "pos", "rsid", "ref", "alt"],
                        usecols=[0, 1, 2, 3, 4], dtype=str)
-    pvar_lookup = pvar.set_index("rsid")[["ref", "alt"]].to_dict("index")
+    pvar_lookup: dict[str, tuple[str, str]] = {
+        row["rsid"]: (row["ref"], row["alt"])
+        for _, row in pvar.iterrows()
+        if pd.notna(row["rsid"])
+    }
 
-    # -- Align: intersect sumstats ↔ ref, handle allele flips ----------------
-    ref_set = set(ref_snps)
-    ref_idx = {snp: i for i, snp in enumerate(ref_snps)}
-
-    keep_rows: list[int] = []        # indices into sumstats
-    keep_ref_idx: list[int] = []     # indices into ld_raw / ref_snps
-    flip_positions: list[int] = []   # positions in the *output* arrays to flip
-    n_match = n_flip = n_drop = 0
-
-    for i, row in sumstats.iterrows():
-        rsid = row["rsid"]
-        if rsid not in ref_set:
-            continue
-        # Look up reference alleles
-        ref_alleles = pvar_lookup.get(rsid)
-        if ref_alleles is None:
-            continue
-        action = _alleles_match(
-            str(row["a1"]), str(row["a2"]),
-            ref_alleles["ref"], ref_alleles["alt"],
-        )
-        if action == "drop":
-            n_drop += 1
-            continue
-        keep_rows.append(i)
-        keep_ref_idx.append(ref_idx[rsid])
-        if action == "flip":
-            flip_positions.append(len(keep_rows) - 1)
-            n_flip += 1
-        else:
-            n_match += 1
+    # -- Harmonize alleles via the shared function ----------------------------
+    aligned_ss, ld_sub, snp_order, report = harmonize_alleles(
+        sumstats, ref_snps, pvar_lookup, ld_raw, match_by="rsid",
+    )
 
     logger.info(
-        "Allele alignment: %d match, %d flipped, %d dropped, %d not in ref",
-        n_match, n_flip, n_drop, len(sumstats) - n_match - n_flip - n_drop,
+        "Allele harmonization: %d keep, %d flipped, %d ambig, %d mismatch, %d not in ref",
+        report["n_keep"], report["n_flip"], report["n_ambiguous_dropped"],
+        report["n_mismatch_dropped"], report["n_not_in_ref"],
     )
     print(
-        f"    Alleles: {n_match} match, {n_flip} flipped, {n_drop} dropped, "
-        f"{len(sumstats) - n_match - n_flip - n_drop} not in ref"
+        f"    Alleles: {report['n_keep']} keep, {report['n_flip']} flipped, "
+        f"{report['n_ambiguous_dropped']} ambig, {report['n_mismatch_dropped']} mismatch, "
+        f"{report['n_not_in_ref']} not in ref"
     )
 
-    if not keep_rows:
+    if report["n_final"] == 0:
         raise ValueError(
             f"No overlapping SNPs between sumstats and reference for "
             f"{locus_name}_{trait}"
         )
-
-    # -- Subset and align -----------------------------------------------------
-    aligned_ss = sumstats.iloc[keep_rows].reset_index(drop=True)
-    ld_sub = ld_raw[np.ix_(keep_ref_idx, keep_ref_idx)]
-    snp_order = [ref_snps[j] for j in keep_ref_idx]
-
-    # -- Flip z-scores for swapped alleles ------------------------------------
-    # z = beta / se; flipping the effect allele negates z
-    if flip_positions:
-        z = aligned_ss["beta"].values / aligned_ss["se"].values
-        for pos in flip_positions:
-            z[pos] = -z[pos]
-        aligned_ss = aligned_ss.copy()
-        aligned_ss["z"] = z
-        logger.info("Flipped z-scores at %d positions", len(flip_positions))
-    else:
-        aligned_ss = aligned_ss.copy()
-        aligned_ss["z"] = aligned_ss["beta"].values / aligned_ss["se"].values
 
     # -- Save outputs ---------------------------------------------------------
     LD_DIR.mkdir(parents=True, exist_ok=True)
@@ -404,11 +743,7 @@ def build_locus_ld(
         "Saved LD (%d x %d) to %s", ld_sub.shape[0], ld_sub.shape[1], ld_out
     )
 
-    # -- Final consistency check ----------------------------------------------
-    assert len(aligned_ss) == ld_sub.shape[0] == ld_sub.shape[1], (
-        f"Dimension mismatch: df={len(aligned_ss)}, "
-        f"ld={ld_sub.shape[0]}x{ld_sub.shape[1]}"
-    )
+    assert len(aligned_ss) == ld_sub.shape[0] == ld_sub.shape[1]
 
     print(
         f"    LD matrix: {ld_sub.shape[0]} x {ld_sub.shape[1]} "
