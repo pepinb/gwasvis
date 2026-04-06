@@ -110,6 +110,13 @@ def summarize_finemap() -> pd.DataFrame:
 
         converged = bool(df["converged"].iloc[0]) if "converged" in df.columns else None
 
+        # Locus note (e.g. paper lead dropped by MAF filter)
+        locus_note = None
+        if "locus_note" in df.columns:
+            note_vals = df["locus_note"].dropna().unique()
+            if len(note_vals) > 0:
+                locus_note = str(note_vals[0])
+
         rows.append({
             "locus": name,
             "trait": trait,
@@ -121,6 +128,7 @@ def summarize_finemap() -> pd.DataFrame:
             "cs_size": cs_size,
             "paper_lead_in_cs": paper_in_cs,
             "paper_lead_pip": paper_lead_pip,
+            "locus_note": locus_note,
         })
 
     summary = pd.DataFrame(rows)

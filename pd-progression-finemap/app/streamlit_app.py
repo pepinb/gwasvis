@@ -19,16 +19,40 @@ import streamlit as st
 
 FINEMAP_DIR = Path(__file__).resolve().parent.parent / "data" / "finemap"
 
-# Paper lead SNPs (locus_name → lead_rsid)
+# Paper lead SNPs (locus_name → info dict).
+# Mortality sumstats use chr:pos as rsid; HY3 uses actual rsids.
 _PAPER_LEADS: dict[str, dict] = {
-    "APOE": {"rsid": "rs429358", "trait": "mortality"},
-    "TBXAS1": {"rsid": "rs4726467", "trait": "mortality"},
-    "SYT10": {"rsid": "rs10437796", "trait": "mortality"},
-    "MORN1": {"rsid": "rs115217673", "trait": "hy3"},
-    "ASNS": {"rsid": "rs145274312", "trait": "hy3"},
-    "PDE5A": {"rsid": "rs113120976", "trait": "hy3"},
-    "XPO1": {"rsid": "rs141421624", "trait": "hy3"},
+    "APOE": {"rsid": "rs429358", "chrpos": "19:45411941", "pos": 45411941, "trait": "mortality"},
+    "TBXAS1": {"rsid": "rs4726467", "chrpos": "7:139637422", "pos": 139637422, "trait": "mortality"},
+    "SYT10": {"rsid": "rs10437796", "chrpos": "12:33635494", "pos": 33635494, "trait": "mortality"},
+    "MORN1": {"rsid": "rs115217673", "pos": 2315032, "trait": "hy3"},
+    "ASNS": {"rsid": "rs145274312", "pos": 97470925, "trait": "hy3"},
+    "PDE5A": {"rsid": "rs113120976", "pos": 120566153, "trait": "hy3"},
+    "XPO1": {"rsid": "rs141421624", "pos": 61742356, "trait": "hy3"},
 }
+
+
+def _find_paper_lead_row(df: pd.DataFrame, paper_info: dict) -> pd.Series | None:
+    """Find the paper's lead variant in finemap data, trying rsid, chr:pos, and position."""
+    rsid = paper_info.get("rsid", "")
+    # Try by rsid
+    if rsid and "rsid" in df.columns:
+        rows = df[df["rsid"] == rsid]
+        if not rows.empty:
+            return rows.iloc[0]
+    # Try by chr:pos (mortality loci use this as the rsid column)
+    chrpos = paper_info.get("chrpos", "")
+    if chrpos and "rsid" in df.columns:
+        rows = df[df["rsid"] == chrpos]
+        if not rows.empty:
+            return rows.iloc[0]
+    # Try by position
+    pos = paper_info.get("pos")
+    if pos is not None and "pos" in df.columns:
+        rows = df[df["pos"] == pos]
+        if not rows.empty:
+            return rows.iloc[0]
+    return None
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -257,13 +281,27 @@ def main() -> None:
 
     paper_info = _PAPER_LEADS.get(selected_name, {})
     paper_lead_rsid = paper_info.get("rsid", "")
+    lead_row = _find_paper_lead_row(df, paper_info)
+
+    # For LocusZoom, pass the actual rsid value used in the data
+    plot_lead_rsid = str(lead_row["rsid"]) if lead_row is not None else paper_lead_rsid
+
+    # -- Locus note (e.g. MAF filter drop) ------------------------------------
+    locus_note = None
+    if "locus_note" in df.columns:
+        note_vals = df["locus_note"].dropna().unique()
+        if len(note_vals) > 0:
+            locus_note = str(note_vals[0])
+
+    if locus_note:
+        st.info(locus_note)
 
     # -- Layout: two columns --------------------------------------------------
     col_left, col_right = st.columns([3, 1])
 
     with col_left:
         # LocusZoom plot
-        fig_lz = make_locuszoom(df, paper_lead_rsid)
+        fig_lz = make_locuszoom(df, plot_lead_rsid)
         st.plotly_chart(fig_lz, use_container_width=True)
 
         # PIP track
@@ -294,15 +332,21 @@ def main() -> None:
         st.metric("Top SNP", top_rsid)
 
         # Paper lead status
-        lead_match = df[df["rsid"] == paper_lead_rsid]
-        if not lead_match.empty:
-            lr = lead_match.iloc[0]
-            lead_in_cs = bool(lr["in_cs"])
+        if lead_row is not None:
+            lead_in_cs = bool(lead_row["in_cs"])
+            display_rsid = paper_lead_rsid
+            data_rsid = str(lead_row["rsid"])
+            # Show both identifiers if they differ (mortality loci)
+            if data_rsid != paper_lead_rsid:
+                display_rsid = f"{paper_lead_rsid} ({data_rsid})"
             st.info(
-                f"Paper lead: **{paper_lead_rsid}**\n\n"
-                f"PIP = {lr['pip']:.4f} | "
+                f"Paper lead: **{display_rsid}**\n\n"
+                f"PIP = {lead_row['pip']:.4f} | "
                 f"In CS: {'Yes' if lead_in_cs else 'No'}"
             )
+        elif locus_note:
+            # Already displayed the locus_note above; no redundant warning
+            pass
         else:
             st.warning(f"Paper lead {paper_lead_rsid} not in locus data")
 

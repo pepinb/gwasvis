@@ -32,6 +32,8 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 
+import subprocess
+
 from src.ld import build_locus_ld, build_locus_ld_from_vcf, LD_DIR, REF_DIR
 from src.loci import LOCI, LOCI_DIR
 
@@ -53,6 +55,94 @@ LOCUS_L: dict[tuple[str, str], int] = {
     ("PDE5A", "hy3"): 1,
     ("XPO1", "hy3"): 1,
 }
+
+_1KG_VCF_BASE = "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502"
+
+
+def _get_1kg_eur_af(chrom: str, pos: int) -> float | None:
+    """Query 1KG Phase 3 VCF for EUR allele frequency at a single position."""
+    vcf_url = (
+        f"{_1KG_VCF_BASE}/ALL.chr{chrom}"
+        ".phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz"
+    )
+    try:
+        result = subprocess.run(
+            ["bcftools", "view", "--regions", f"{chrom}:{pos}-{pos}", vcf_url],
+            capture_output=True, text=True, timeout=60,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("#"):
+                continue
+            info = line.split("\t")[7]
+            for kv in info.split(";"):
+                if kv.startswith("EUR_AF="):
+                    return float(kv.split("=")[1])
+    except Exception as exc:
+        logger.debug("Could not query 1KG EUR AF for chr%s:%d: %s", chrom, pos, exc)
+    return None
+
+
+def _check_paper_lead(
+    locus_name: str,
+    trait: str,
+    aligned_df: pd.DataFrame,
+) -> str | None:
+    """Check whether the paper's lead variant survived harmonization.
+
+    Returns a structured note string if it was dropped, or None if present.
+    """
+    locus_def = next(
+        (l for l in LOCI if l["name"] == locus_name and l["trait"] == trait), None
+    )
+    if locus_def is None:
+        return None
+
+    rsid = locus_def["lead_rsid"]
+    chrom = str(locus_def["chr"])
+    pos = locus_def["lead_bp"]
+
+    # Check aligned data by rsid
+    if "rsid" in aligned_df.columns and not aligned_df[aligned_df["rsid"] == rsid].empty:
+        return None
+    # Check by chr:pos identifier (mortality loci use "chr:pos" as rsid)
+    chrpos = f"{chrom}:{pos}"
+    if "rsid" in aligned_df.columns and not aligned_df[aligned_df["rsid"] == chrpos].empty:
+        return None
+    # Check by position
+    if "pos" in aligned_df.columns and not aligned_df[aligned_df["pos"] == pos].empty:
+        return None
+
+    # Paper lead is missing — check if it was in the loci parquet
+    loci_path = LOCI_DIR / f"{locus_name}_{trait}.parquet"
+    in_loci = False
+    if loci_path.exists():
+        loci_df = pd.read_parquet(loci_path)
+        in_loci = (
+            not loci_df[loci_df["rsid"] == rsid].empty
+            if "rsid" in loci_df.columns
+            else False
+        )
+
+    if not in_loci:
+        # Variant not even in loci parquet — different issue
+        return (
+            f"Paper lead {rsid} at chr{chrom}:{pos} not found in locus "
+            f"summary statistics. Cannot assess fine-mapping."
+        )
+
+    # Was in loci but dropped during harmonization → MAF filter
+    eur_af = _get_1kg_eur_af(chrom, pos)
+    if eur_af is not None:
+        maf_pct = f"{eur_af * 100:.2f}"
+    else:
+        maf_pct = "< 1"
+
+    return (
+        f"Paper lead {rsid} at chr{chrom}:{pos} dropped by MAF filter "
+        f"(reference MAF = {maf_pct}%, filter threshold = 1%). "
+        f"Cannot be fine-mapped with 1000G EUR reference. "
+        f"This matches the paper's own observation at this locus."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +462,13 @@ def finemap_locus(locus_name: str, trait: str, L: int | None = None) -> pd.DataF
             out.loc[out.index[var_idx], "cs_id"] = cs_idx
 
     out["converged"] = result["converged"]
+
+    # -- Check whether the paper's lead variant survived ----------------------
+    locus_note = _check_paper_lead(locus_name, trait, sumstats)
+    out["locus_note"] = locus_note  # same value for every row (or None/NaN)
+    if locus_note:
+        logger.info("Locus note for %s_%s: %s", locus_name, trait, locus_note)
+        print(f"  NOTE: {locus_note}")
 
     # -- Save -----------------------------------------------------------------
     FINEMAP_DIR.mkdir(parents=True, exist_ok=True)

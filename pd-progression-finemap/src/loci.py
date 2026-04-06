@@ -68,7 +68,7 @@ LOCI: list[dict] = [
     {
         "name": "MORN1",
         "chr": "1",
-        "lead_bp": 2308517,
+        "lead_bp": 2315032,  # Ensembl GRCh37; paper Table 3 reported 2308517
         "lead_rsid": "rs115217673",
         "trait": "hy3",
         "build": "hg19",
@@ -76,7 +76,7 @@ LOCI: list[dict] = [
     {
         "name": "ASNS",
         "chr": "7",
-        "lead_bp": 97478547,
+        "lead_bp": 97470925,  # Ensembl GRCh37; paper Table 3 reported 97478547
         "lead_rsid": "rs145274312",
         "trait": "hy3",
         "build": "hg19",
@@ -84,7 +84,7 @@ LOCI: list[dict] = [
     {
         "name": "PDE5A",
         "chr": "4",
-        "lead_bp": 120416730,
+        "lead_bp": 120566153,  # Ensembl GRCh37; paper Table 3 reported 120416730
         "lead_rsid": "rs113120976",
         "trait": "hy3",
         "build": "hg19",
@@ -92,7 +92,7 @@ LOCI: list[dict] = [
     {
         "name": "XPO1",
         "chr": "2",
-        "lead_bp": 61709726,
+        "lead_bp": 61742356,  # Ensembl GRCh37; paper Table 3 reported 61709726
         "lead_rsid": "rs141421624",
         "trait": "hy3",
         "build": "hg19",
