@@ -60,20 +60,34 @@ _1KG_VCF_BASE = "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502"
 
 
 def _get_1kg_eur_af(chrom: str, pos: int) -> float | None:
-    """Query 1KG Phase 3 VCF for EUR allele frequency at a single position."""
+    """Query 1KG Phase 3 VCF for EUR allele frequency at a single position.
+
+    Filters for biallelic SNPs at the exact position (structural variants
+    and indels are skipped).
+    """
     vcf_url = (
         f"{_1KG_VCF_BASE}/ALL.chr{chrom}"
         ".phase3_shapeit2_mvncall_integrated_v5b.20130502.genotypes.vcf.gz"
     )
     try:
         result = subprocess.run(
-            ["bcftools", "view", "--regions", f"{chrom}:{pos}-{pos}", vcf_url],
+            [
+                "bcftools", "view",
+                "--regions", f"{chrom}:{pos}-{pos}",
+                "--types", "snps",
+                "--min-alleles", "2", "--max-alleles", "2",
+                vcf_url,
+            ],
             capture_output=True, text=True, timeout=60,
         )
         for line in result.stdout.splitlines():
             if line.startswith("#"):
                 continue
-            info = line.split("\t")[7]
+            fields = line.split("\t")
+            # Verify exact position match (tabix can return overlapping records)
+            if int(fields[1]) != pos:
+                continue
+            info = fields[7]
             for kv in info.split(";"):
                 if kv.startswith("EUR_AF="):
                     return float(kv.split("=")[1])

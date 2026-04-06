@@ -1,8 +1,8 @@
-locus,trait,n_vars,L,converged,top_pip,top_variant,cs_size,paper_lead_in_cs,paper_lead_pip,locus_note
-APOE,mortality,2409,2,True,0.8605,19:45411941,2,True,0.8605,
-TBXAS1,mortality,2063,1,True,0.554,7:139637422,4,True,0.554,
-SYT10,mortality,2320,1,True,0.1039,12:33635494,0,False,0.1039,
-MORN1,hy3,1815,1,True,0.5689,rs115217673,4,True,0.5689,
-ASNS,hy3,2265,1,True,0.03,rs12669058,0,False,,"Paper lead rs145274312 at chr7:97470925 dropped by MAF filter (reference MAF = 0.20%, filter threshold = 1%). Cannot be fine-mapped with 1000G EUR reference. This matches the paper's own observation at this locus."
-PDE5A,hy3,2092,1,True,0.9842,rs113120976,1,True,0.9842,
-XPO1,hy3,1694,1,True,0.8354,rs141421624,4,True,0.8354,
+locus,trait,paper_lead,paper_pval,n_vars,L,converged,top_pip,top_variant,cs_size,paper_lead_in_cs,paper_lead_pip,reference_maf,locus_status,reason,locus_note
+APOE,mortality,rs429358,1.35e-10,2409,2,True,0.8605,19:45411941,2,True,0.8605,0.1551,REPLICATED,,
+TBXAS1,mortality,rs4726467,7.71e-10,2063,1,True,0.554,7:139637422,4,True,0.554,0.0229,REPLICATED,,
+SYT10,mortality,rs10437796,5.31e-08,2320,1,True,0.1039,12:33635494,0,False,0.1039,0.1024,CAUTION,SuSiE converged but paper lead not in any credible set.,
+MORN1,hy3,rs115217673,3.09e-09,1815,1,True,0.5689,rs115217673,4,True,0.5689,0.0169,REPLICATED,,
+ASNS,hy3,rs145274312,3.49e-09,2265,1,True,0.03,rs12669058,0,False,,0.002,NOT_TESTABLE,"Paper lead rs145274312 at chr7:97470925 dropped by MAF filter (reference MAF = 0.20%, filter threshold = 1%). Cannot be fine-mapped with 1000G EUR reference. This matches the paper's own observation at this locus.","Paper lead rs145274312 at chr7:97470925 dropped by MAF filter (reference MAF = 0.20%, filter threshold = 1%). Cannot be fine-mapped with 1000G EUR reference. This matches the paper's own observation at this locus."
+PDE5A,hy3,rs113120976,6.95e-09,2092,1,True,0.9842,rs113120976,1,True,0.9842,0.0149,REPLICATED,,
+XPO1,hy3,rs141421624,3.08e-08,1694,1,True,0.8354,rs141421624,4,True,0.8354,0.0109,REPLICATED,,

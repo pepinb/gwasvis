@@ -18,8 +18,9 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 
 FINEMAP_DIR = Path(__file__).resolve().parent.parent / "data" / "finemap"
+SUMMARY_CSV = FINEMAP_DIR / "baseline_summary.csv"
 
-# Paper lead SNPs (locus_name → info dict).
+# Paper lead SNPs (locus_name -> info dict).
 # Mortality sumstats use chr:pos as rsid; HY3 uses actual rsids.
 _PAPER_LEADS: dict[str, dict] = {
     "APOE": {"rsid": "rs429358", "chrpos": "19:45411941", "pos": 45411941, "trait": "mortality"},
@@ -31,28 +32,33 @@ _PAPER_LEADS: dict[str, dict] = {
     "XPO1": {"rsid": "rs141421624", "pos": 61742356, "trait": "hy3"},
 }
 
+_STATUS_BADGES: dict[str, str] = {
+    "REPLICATED": "\U0001f7e2 REPLICATED",
+    "CAUTION": "\U0001f7e1 CAUTION",
+    "NOT_TESTABLE": "\U0001f534 NOT TESTABLE",
+    "FAILED": "\u26aa FAILED",
+}
+
 
 def _find_paper_lead_row(df: pd.DataFrame, paper_info: dict) -> pd.Series | None:
     """Find the paper's lead variant in finemap data, trying rsid, chr:pos, and position."""
     rsid = paper_info.get("rsid", "")
-    # Try by rsid
     if rsid and "rsid" in df.columns:
         rows = df[df["rsid"] == rsid]
         if not rows.empty:
             return rows.iloc[0]
-    # Try by chr:pos (mortality loci use this as the rsid column)
     chrpos = paper_info.get("chrpos", "")
     if chrpos and "rsid" in df.columns:
         rows = df[df["rsid"] == chrpos]
         if not rows.empty:
             return rows.iloc[0]
-    # Try by position
     pos = paper_info.get("pos")
     if pos is not None and "pos" in df.columns:
         rows = df[df["pos"] == pos]
         if not rows.empty:
             return rows.iloc[0]
     return None
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -64,9 +70,7 @@ def discover_loci() -> list[dict]:
     """Scan data/finemap/ for parquet files and return available (name, trait) pairs."""
     loci = []
     for p in sorted(FINEMAP_DIR.glob("*.parquet")):
-        if p.name == "baseline_summary.csv":
-            continue
-        stem = p.stem  # e.g. "APOE_mortality"
+        stem = p.stem
         parts = stem.rsplit("_", 1)
         if len(parts) == 2:
             loci.append({"name": parts[0], "trait": parts[1], "path": str(p)})
@@ -82,6 +86,14 @@ def load_locus(path: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data
+def load_summary() -> pd.DataFrame | None:
+    """Load baseline_summary.csv if it exists."""
+    if SUMMARY_CSV.exists():
+        return pd.read_csv(SUMMARY_CSV)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
@@ -91,7 +103,6 @@ def make_locuszoom(df: pd.DataFrame, paper_lead_rsid: str) -> go.Figure:
     """LocusZoom-style scatter: x=pos, y=-log10(p), color=PIP."""
     fig = go.Figure()
 
-    # Main scatter — all variants
     fig.add_trace(
         go.Scatter(
             x=df["pos"],
@@ -119,7 +130,6 @@ def make_locuszoom(df: pd.DataFrame, paper_lead_rsid: str) -> go.Figure:
         )
     )
 
-    # Highlight paper lead SNP with a star
     lead = df[df["rsid"] == paper_lead_rsid]
     if not lead.empty:
         fig.add_trace(
@@ -146,7 +156,6 @@ def make_locuszoom(df: pd.DataFrame, paper_lead_rsid: str) -> go.Figure:
             )
         )
 
-    # Genome-wide significance line
     fig.add_hline(
         y=-np.log10(5e-8),
         line_dash="dash",
@@ -172,7 +181,6 @@ def make_pip_track(df: pd.DataFrame) -> go.Figure:
 
     fig = go.Figure()
 
-    # Background bars (not in CS)
     bg = df[~in_cs]
     if not bg.empty:
         fig.add_trace(
@@ -187,7 +195,6 @@ def make_pip_track(df: pd.DataFrame) -> go.Figure:
             )
         )
 
-    # Highlighted bars (in CS)
     cs = df[in_cs]
     if not cs.empty:
         fig.add_trace(
@@ -220,47 +227,20 @@ def make_pip_track(df: pd.DataFrame) -> go.Figure:
 
 
 # ---------------------------------------------------------------------------
-# App
+# Views
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    st.set_page_config(
-        page_title="PD Fine-Mapping Viewer",
-        layout="wide",
-    )
 
-    st.title("PD Progression Fine-Mapping")
+def view_locus_detail(available: list[dict]) -> None:
+    """Render the single-locus detail view (LocusZoom + PIP + CS)."""
+    # -- Sidebar locus selection (already rendered) --
+    selected_name = st.session_state.get("selected_locus")
+    selected_trait = st.session_state.get("selected_trait")
 
-    # -- Discover available loci ----------------------------------------------
-    available = discover_loci()
-    if not available:
-        st.error(
-            "No finemap parquets found in `data/finemap/`. "
-            "Run: `python -m src.finemap --all`"
-        )
+    if not selected_name or not selected_trait:
+        st.info("Select a locus from the sidebar.")
         return
 
-    # -- Sidebar --------------------------------------------------------------
-    with st.sidebar:
-        st.header("Locus selection")
-
-        # Locus names (unique)
-        locus_names = sorted({loc["name"] for loc in available})
-        selected_name = st.selectbox("Locus", locus_names)
-
-        # Filter traits available for this locus
-        traits_for_locus = sorted(
-            {loc["trait"] for loc in available if loc["name"] == selected_name}
-        )
-        selected_trait = st.radio("Trait", traits_for_locus)
-
-        st.divider()
-        st.caption(
-            "Tan et al. (2024) — Genome-wide determinants of mortality "
-            "and motor progression in Parkinson's disease"
-        )
-
-    # -- Load data ------------------------------------------------------------
     match = [
         loc for loc in available
         if loc["name"] == selected_name and loc["trait"] == selected_trait
@@ -283,10 +263,9 @@ def main() -> None:
     paper_lead_rsid = paper_info.get("rsid", "")
     lead_row = _find_paper_lead_row(df, paper_info)
 
-    # For LocusZoom, pass the actual rsid value used in the data
     plot_lead_rsid = str(lead_row["rsid"]) if lead_row is not None else paper_lead_rsid
 
-    # -- Locus note (e.g. MAF filter drop) ------------------------------------
+    # -- Locus note -----------------------------------------------------------
     locus_note = None
     if "locus_note" in df.columns:
         note_vals = df["locus_note"].dropna().unique()
@@ -296,20 +275,17 @@ def main() -> None:
     if locus_note:
         st.info(locus_note)
 
-    # -- Layout: two columns --------------------------------------------------
+    # -- Layout ---------------------------------------------------------------
     col_left, col_right = st.columns([3, 1])
 
     with col_left:
-        # LocusZoom plot
         fig_lz = make_locuszoom(df, plot_lead_rsid)
         st.plotly_chart(fig_lz, use_container_width=True)
 
-        # PIP track
         fig_pip = make_pip_track(df)
         st.plotly_chart(fig_pip, use_container_width=True)
 
     with col_right:
-        # -- Metrics ----------------------------------------------------------
         st.subheader("Summary")
 
         cs_variants = df[df["in_cs"]]
@@ -336,7 +312,6 @@ def main() -> None:
             lead_in_cs = bool(lead_row["in_cs"])
             display_rsid = paper_lead_rsid
             data_rsid = str(lead_row["rsid"])
-            # Show both identifiers if they differ (mortality loci)
             if data_rsid != paper_lead_rsid:
                 display_rsid = f"{paper_lead_rsid} ({data_rsid})"
             st.info(
@@ -345,12 +320,11 @@ def main() -> None:
                 f"In CS: {'Yes' if lead_in_cs else 'No'}"
             )
         elif locus_note:
-            # Already displayed the locus_note above; no redundant warning
             pass
         else:
             st.warning(f"Paper lead {paper_lead_rsid} not in locus data")
 
-        # -- Credible set table -----------------------------------------------
+        # Credible set table
         st.subheader("Credible set variants")
         if not cs_variants.empty:
             display_cols = ["rsid", "pos", "pip", "pval", "beta", "cs_id"]
@@ -360,7 +334,6 @@ def main() -> None:
         else:
             st.caption("No credible set variants (purity filter may have removed all CS).")
 
-        # -- Full table expander ----------------------------------------------
         with st.expander("Full locus table"):
             show_cols = ["rsid", "pos", "pval", "beta", "se", "pip", "in_cs", "cs_id"]
             show_cols = [c for c in show_cols if c in df.columns]
@@ -370,6 +343,167 @@ def main() -> None:
                 hide_index=True,
                 height=400,
             )
+
+
+def view_benchmark() -> None:
+    """Render the benchmark comparison table."""
+    summary = load_summary()
+    if summary is None:
+        st.error(
+            "No baseline_summary.csv found. "
+            "Run: `python -m src.evaluate`"
+        )
+        return
+
+    st.subheader("Pipeline vs Paper — Benchmark Table")
+    st.caption(
+        "Comparing our SuSiE-RSS fine-mapping results (1000G EUR LD reference) "
+        "against the lead variants reported in Tan et al. (2024)."
+    )
+
+    # Build display table
+    rows: list[dict] = []
+    for _, r in summary.iterrows():
+        status_raw = str(r.get("locus_status", ""))
+        status_badge = _STATUS_BADGES.get(status_raw, status_raw)
+
+        # Paper p-value
+        paper_pval = r.get("paper_pval")
+        pval_str = f"{paper_pval:.2e}" if pd.notna(paper_pval) else "N/A"
+
+        # Pipeline top SNP
+        top_variant = str(r.get("top_variant", ""))
+
+        # Top PIP
+        top_pip = r.get("top_pip")
+        pip_str = f"{top_pip:.4f}" if pd.notna(top_pip) else "N/A"
+
+        # Paper lead in CS
+        if status_raw == "NOT_TESTABLE":
+            lead_cs = "N/A"
+        elif r.get("paper_lead_in_cs"):
+            lead_cs = "\u2713"
+        else:
+            lead_cs = "\u2717"
+
+        # CS size
+        cs_size = r.get("cs_size")
+        if status_raw == "NOT_TESTABLE":
+            cs_str = "N/A"
+        elif pd.notna(cs_size):
+            cs_str = str(int(cs_size))
+        else:
+            cs_str = "N/A"
+
+        # Reference MAF
+        ref_maf = r.get("reference_maf")
+        if pd.notna(ref_maf):
+            maf_str = f"{float(ref_maf) * 100:.2f}%"
+        else:
+            maf_str = "absent"
+
+        # Paper lead PIP
+        lead_pip = r.get("paper_lead_pip")
+        lead_pip_str = f"{lead_pip:.4f}" if pd.notna(lead_pip) else "N/A"
+
+        rows.append({
+            "Locus": r["locus"],
+            "Trait": r["trait"],
+            "Paper Lead": str(r.get("paper_lead", "")),
+            "Paper p-value": pval_str,
+            "Top SNP": top_variant,
+            "Top PIP": pip_str,
+            "Lead in CS": lead_cs,
+            "Lead PIP": lead_pip_str,
+            "CS Size": cs_str,
+            "Ref MAF (1KG EUR)": maf_str,
+            "Status": status_badge,
+        })
+
+    bench_df = pd.DataFrame(rows)
+
+    st.dataframe(
+        bench_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Status": st.column_config.TextColumn(width="medium"),
+            "Paper p-value": st.column_config.TextColumn(width="small"),
+            "Top PIP": st.column_config.TextColumn(width="small"),
+            "Lead PIP": st.column_config.TextColumn(width="small"),
+            "Lead in CS": st.column_config.TextColumn(width="small"),
+            "CS Size": st.column_config.TextColumn(width="small"),
+            "Ref MAF (1KG EUR)": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+    # Status legend
+    st.markdown(
+        "**Status key:** "
+        "\U0001f7e2 Paper lead replicated in credible set (PIP \u2265 0.1) · "
+        "\U0001f7e1 Signal present but not fine-resolved · "
+        "\U0001f534 Paper lead absent from reference (MAF filter) · "
+        "\u26aa SuSiE did not converge"
+    )
+
+    # Expandable reason column
+    reasons = summary[summary["reason"].notna() & (summary["reason"] != "")]
+    if not reasons.empty:
+        with st.expander("Status details"):
+            for _, r in reasons.iterrows():
+                status_badge = _STATUS_BADGES.get(str(r.get("locus_status", "")), "")
+                st.markdown(f"**{r['locus']}** ({r['trait']}) — {status_badge}")
+                st.caption(str(r["reason"]))
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    st.set_page_config(
+        page_title="PD Fine-Mapping Viewer",
+        layout="wide",
+    )
+
+    st.title("PD Progression Fine-Mapping")
+
+    available = discover_loci()
+    if not available:
+        st.error(
+            "No finemap parquets found in `data/finemap/`. "
+            "Run: `python -m src.finemap --all`"
+        )
+        return
+
+    # -- Sidebar ---------------------------------------------------------------
+    with st.sidebar:
+        st.header("Navigation")
+
+        locus_names = sorted({loc["name"] for loc in available})
+        selected_name = st.selectbox("Locus", locus_names)
+        st.session_state["selected_locus"] = selected_name
+
+        traits_for_locus = sorted(
+            {loc["trait"] for loc in available if loc["name"] == selected_name}
+        )
+        selected_trait = st.radio("Trait", traits_for_locus)
+        st.session_state["selected_trait"] = selected_trait
+
+        st.divider()
+        st.caption(
+            "Tan et al. (2024) — Genome-wide determinants of mortality "
+            "and motor progression in Parkinson's disease"
+        )
+
+    # -- Tabs ------------------------------------------------------------------
+    tab_detail, tab_benchmark = st.tabs(["Locus Detail", "Benchmark"])
+
+    with tab_detail:
+        view_locus_detail(available)
+
+    with tab_benchmark:
+        view_benchmark()
 
 
 if __name__ == "__main__":
