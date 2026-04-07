@@ -470,178 +470,231 @@ def view_evo2(model: str) -> None:
                     f"not extreme ({pct:.1f}th percentile)."
                 )
             elif pct < 65:
-                st.warning(
+                msg = (
                     f"No clear functional signal at this position from Evo 2 "
                     f"{model.upper()} ({pct:.1f}th percentile)."
                 )
+                if model == "1b":
+                    msg += (
+                        " This locus is a candidate for re-scoring with Evo 2 7B, "
+                        "which is expected to have better resolution for noncoding "
+                        "regulatory variants."
+                    )
+                st.warning(msg)
             else:
-                st.warning(
+                msg = (
                     f"Alt allele scored as more plausible than reference "
                     f"({pct:.1f}th percentile); could indicate low constraint, "
                     f"ancestral allele, or model blind spot."
                 )
+                if model == "1b":
+                    msg += (
+                        " Worth re-scoring with 7B to see if the signal direction "
+                        "changes."
+                    )
+                st.warning(msg)
     else:
         st.warning(f"Paper lead {paper_lead_rsid} not found in Evo 2 scored set.")
 
     # ── PANEL B: GWAS vs Evo 2 scatter ─────────────────────────────────
-    loci_df = load_loci_parquet(selected_name, selected_trait)
-    if loci_df is not None:
-        # Join evo2 scores to GWAS data on position
-        merged = loci_df.merge(
-            scored[["pos", "delta_log_likelihood", "rsid"]].rename(
-                columns={"rsid": "evo2_rsid"}
-            ),
-            on="pos",
-            how="inner",
-        )
+    # Use finemap parquet as GWAS source (committed to git, always available).
+    # Falls back to data/loci/ parquet if finemap doesn't exist.
+    try:
+        finemap_path = FINEMAP_DIR / f"{selected_name}_{selected_trait}.parquet"
+        gwas_df = None
+        has_pip = False
+        if finemap_path.exists():
+            gwas_df = pd.read_parquet(finemap_path)
+            has_pip = "pip" in gwas_df.columns
+        else:
+            gwas_df = load_loci_parquet(selected_name, selected_trait)
 
-        if not merged.empty:
-            merged["neglog10p"] = -np.log10(merged["pval"].clip(lower=1e-300))
-
-            # Try to get PIP from finemap
-            finemap_path = FINEMAP_DIR / f"{selected_name}_{selected_trait}.parquet"
-            if finemap_path.exists():
-                fdf = pd.read_parquet(finemap_path)
-                merged = merged.merge(
-                    fdf[["pos", "pip"]].drop_duplicates(subset=["pos"]),
-                    on="pos",
-                    how="left",
-                )
-                merged["pip"] = merged["pip"].fillna(0)
-                color_col = merged["pip"]
-                colorbar_title = "PIP"
-            else:
-                color_col = "#4a90d9"
-                colorbar_title = None
-
-            # Identify paper lead
-            lead_pos = paper_info.get("pos")
-            is_lead = merged["pos"] == lead_pos
-
-            fig = go.Figure()
-
-            # Background variants
-            bg = merged[~is_lead]
-            marker_kwargs = dict(
-                size=6,
-                line=dict(width=0.3, color="white"),
+        if gwas_df is not None and "pval" in gwas_df.columns:
+            merged = gwas_df.merge(
+                scored[["pos", "delta_log_likelihood"]],
+                on="pos",
+                how="inner",
             )
-            if colorbar_title:
-                marker_kwargs["color"] = bg["pip"]
-                marker_kwargs["colorscale"] = "Viridis"
-                marker_kwargs["cmin"] = 0
-                marker_kwargs["cmax"] = 1
-                marker_kwargs["colorbar"] = dict(title=colorbar_title, thickness=12, len=0.6)
-            else:
-                marker_kwargs["color"] = color_col
 
-            fig.add_trace(go.Scatter(
-                x=bg["neglog10p"],
-                y=bg["delta_log_likelihood"],
-                mode="markers",
-                marker=marker_kwargs,
-                text=bg.apply(
-                    lambda r: (
-                        f"{r['rsid']}<br>"
-                        f"p = {r['pval']:.2e}<br>"
-                        f"delta_ll = {r['delta_log_likelihood']:.2f}"
-                        + (f"<br>PIP = {r['pip']:.3f}" if "pip" in r.index else "")
-                    ),
-                    axis=1,
-                ),
-                hoverinfo="text",
-                name="Variants",
-            ))
+            if not merged.empty:
+                merged["neglog10p"] = -np.log10(merged["pval"].clip(lower=1e-300))
+                if has_pip:
+                    merged["pip"] = merged["pip"].fillna(0)
 
-            # Paper lead star
-            lead_data = merged[is_lead]
-            if not lead_data.empty:
+                lead_pos = paper_info.get("pos")
+                is_lead = merged["pos"] == lead_pos
+
+                fig = go.Figure()
+
+                # Background variants
+                bg = merged[~is_lead].reset_index(drop=True)
+                marker_kwargs = dict(
+                    size=6,
+                    line=dict(width=0.3, color="white"),
+                )
+                if has_pip:
+                    marker_kwargs["color"] = bg["pip"].tolist()
+                    marker_kwargs["colorscale"] = "Viridis"
+                    marker_kwargs["cmin"] = 0
+                    marker_kwargs["cmax"] = 1
+                    marker_kwargs["colorbar"] = dict(title="PIP", thickness=12, len=0.6)
+                else:
+                    marker_kwargs["color"] = "#4a90d9"
+
                 fig.add_trace(go.Scatter(
-                    x=lead_data["neglog10p"],
-                    y=lead_data["delta_log_likelihood"],
+                    x=bg["neglog10p"],
+                    y=bg["delta_log_likelihood"],
                     mode="markers",
-                    marker=dict(
-                        size=14,
-                        symbol="star",
-                        color="red",
-                        line=dict(width=1, color="darkred"),
-                    ),
-                    text=lead_data.apply(
+                    marker=marker_kwargs,
+                    text=bg.apply(
                         lambda r: (
-                            f"<b>{paper_lead_rsid}</b> (paper lead)<br>"
+                            f"{r['rsid']}<br>"
                             f"p = {r['pval']:.2e}<br>"
-                            f"delta_ll = {r['delta_log_likelihood']:.2f}"
+                            f"delta_ll = {r['delta_log_likelihood']:.3f}"
+                            + (f"<br>PIP = {r['pip']:.3f}" if has_pip else "")
                         ),
                         axis=1,
                     ),
                     hoverinfo="text",
-                    name="Paper lead",
+                    name="Variants",
                 ))
 
-            fig.update_layout(
-                title=f"GWAS significance vs Evo 2 disruption score ({model.upper()})",
-                xaxis_title="-log10(p)",
-                yaxis_title="delta_log_likelihood",
-                height=400,
-                margin=dict(l=50, r=20, t=40, b=40),
-                showlegend=False,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption(
-                "Top-left quadrant = high GWAS significance AND predicted disruption "
-                "(negative delta_ll). Variants there have independent statistical and "
-                "evolutionary support."
-            )
+                # Paper lead star
+                lead_data = merged[is_lead]
+                if not lead_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=lead_data["neglog10p"],
+                        y=lead_data["delta_log_likelihood"],
+                        mode="markers",
+                        marker=dict(
+                            size=14,
+                            symbol="star",
+                            color="red",
+                            line=dict(width=1, color="darkred"),
+                        ),
+                        text=lead_data.apply(
+                            lambda r: (
+                                f"<b>{paper_lead_rsid}</b> (paper lead)<br>"
+                                f"p = {r['pval']:.2e}<br>"
+                                f"delta_ll = {r['delta_log_likelihood']:.3f}"
+                                + (f"<br>PIP = {r['pip']:.3f}" if has_pip else "")
+                            ),
+                            axis=1,
+                        ),
+                        hoverinfo="text",
+                        name="Paper lead",
+                    ))
+
+                # Reference lines
+                fig.add_hline(y=0, line_dash="dot", line_color="#bdc3c7", line_width=1)
+                fig.add_vline(
+                    x=-np.log10(5e-8), line_dash="dot", line_color="#bdc3c7",
+                    line_width=1, annotation_text="p=5e-8",
+                    annotation_position="top right",
+                    annotation_font_size=9, annotation_font_color="#7f8c8d",
+                )
+
+                fig.update_layout(
+                    title=f"GWAS significance vs Evo 2 {model.upper()} disruption score",
+                    xaxis_title="-log10(p)",
+                    yaxis_title="delta_log_likelihood",
+                    height=400,
+                    margin=dict(l=50, r=20, t=40, b=40),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(
+                    "Bottom-right quadrant = high GWAS significance and predicted "
+                    "disruption (negative delta = alt allele less plausible). The most "
+                    "informative position for variants to land if Evo 2 is corroborating "
+                    "the GWAS signal. Star = paper-reported lead variant."
+                )
+            else:
+                st.warning("No variants overlap between GWAS and Evo 2 scored data.")
+        else:
+            st.warning("No GWAS data available for scatter plot.")
+    except Exception as exc:
+        st.error(f"Error rendering GWAS vs Evo 2 scatter: {exc}")
 
     # ── PANEL C: Locus null distribution ───────────────────────────────
     dll = scored["delta_log_likelihood"]
+
+    # X-axis range: 1st-99th percentile of locus data with 10% padding
+    locus_lo, locus_hi = float(np.percentile(dll, 1)), float(np.percentile(dll, 99))
+    pad = (locus_hi - locus_lo) * 0.10
+    x_range = [locus_lo - pad, locus_hi + pad]
+
     fig_hist = go.Figure()
 
-    # Null overlay
+    # Null overlay (outline only, density normalized)
+    null_maf_bin = None
     null_df = load_genome_null(model)
     if null_df is not None and cal_matched is not None:
         mrow = cal_matched[cal_matched["locus"] == selected_name]
         if not mrow.empty and pd.notna(mrow.iloc[0].get("maf_bin")):
-            maf_bin = int(mrow.iloc[0]["maf_bin"])
+            null_maf_bin = int(mrow.iloc[0]["maf_bin"])
             null_scored_bin = null_df[
-                (null_df["error"] == "") & (null_df["maf_bin"] == maf_bin)
+                (null_df["error"] == "") & (null_df["maf_bin"] == null_maf_bin)
             ]["delta_log_likelihood"]
             if not null_scored_bin.empty:
-                # Normalize null to same area as locus
-                scale = len(dll) / len(null_scored_bin)
                 fig_hist.add_trace(go.Histogram(
                     x=null_scored_bin,
                     nbinsx=60,
-                    name=f"Genome null (MAF bin {maf_bin})",
-                    marker_color="rgba(150, 150, 150, 0.35)",
-                    histnorm="",
+                    name=f"Genome null (MAF bin {null_maf_bin}, reference)",
+                    marker=dict(
+                        color="rgba(0, 0, 0, 0)",
+                        line=dict(color="rgba(120, 120, 120, 0.5)", width=1.5),
+                    ),
+                    histnorm="probability density",
                 ))
 
     fig_hist.add_trace(go.Histogram(
         x=dll,
         nbinsx=60,
-        name=f"{selected_name} locus",
-        marker_color="rgba(74, 144, 217, 0.7)",
+        name=f"{selected_name} variants",
+        marker_color="rgba(70, 130, 200, 0.7)",
+        histnorm="probability density",
     ))
 
     if lead_dll is not None:
+        # Smart label placement: left if lead is in rightmost 20%, right if leftmost 20%
+        x_span = x_range[1] - x_range[0]
+        if lead_dll > x_range[0] + 0.8 * x_span:
+            ann_pos = "top left"
+        elif lead_dll < x_range[0] + 0.2 * x_span:
+            ann_pos = "top right"
+        else:
+            ann_pos = "top right"
+
+        ann_text = f"{paper_lead_rsid}\n{locus_pctile:.1f}%ile" if locus_pctile else paper_lead_rsid
         fig_hist.add_vline(
             x=lead_dll,
             line_dash="dash",
             line_color="#d94a4a",
-            annotation_text=f"{paper_lead_rsid} ({locus_pctile:.1f}%ile)" if locus_pctile else paper_lead_rsid,
-            annotation_position="top right",
+            annotation_text=ann_text,
+            annotation_position=ann_pos,
         )
 
     fig_hist.update_layout(
         title=f"Locus null distribution ({selected_name}, n={len(dll)})",
         xaxis_title="delta_log_likelihood",
-        yaxis_title="Count",
+        yaxis_title="Density",
         height=350,
         margin=dict(l=50, r=20, t=40, b=40),
         barmode="overlay",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    fig_hist.update_xaxes(range=x_range)
+
+    # Annotation noting the null is clipped to locus range
+    if null_maf_bin is not None:
+        fig_hist.add_annotation(
+            x=x_range[1], y=1, xref="x", yref="paper",
+            text="Genome null clipped to locus range",
+            showarrow=False, font=dict(size=9, color="#999"),
+            xanchor="right", yanchor="top",
+        )
+
     st.plotly_chart(fig_hist, use_container_width=True)
 
     # ── PANEL D: Methodology note ──────────────────────────────────────
