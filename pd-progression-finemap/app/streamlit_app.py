@@ -32,6 +32,11 @@ FINEMAP_DIR = Path(__file__).resolve().parent.parent / "data" / "finemap"
 LOCI_DIR = Path(__file__).resolve().parent.parent / "data" / "loci"
 SUMMARY_CSV = FINEMAP_DIR / "baseline_summary.csv"
 
+# The three models we always show side by side
+_MODELS = ["1b", "7b", "ensemble"]
+_MODEL_LABELS = {"1b": "1B", "7b": "7B", "ensemble": "Ensemble"}
+_MODEL_COLORS = {"1b": "steelblue", "7b": "#e67e22", "ensemble": "#2ecc71"}
+
 # Paper lead SNPs (locus_name -> info dict).
 # Mortality sumstats use chr:pos as rsid; HY3 uses actual rsids.
 _PAPER_LEADS: dict[str, dict] = {
@@ -70,6 +75,61 @@ def _find_paper_lead_row(df: pd.DataFrame, paper_info: dict) -> pd.Series | None
         if not rows.empty:
             return rows.iloc[0]
     return None
+
+
+def _fmt_pct(val, na="--") -> str:
+    """Format a percentile value."""
+    if pd.notna(val):
+        return f"{val:.1f}%"
+    return na
+
+
+def _fmt_dll(val, na="--") -> str:
+    """Format a delta log-likelihood value."""
+    if pd.notna(val):
+        return f"{val:.2f}"
+    return na
+
+
+# ---------------------------------------------------------------------------
+# Data loading helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_all_matched() -> dict[str, pd.DataFrame | None]:
+    """Load calibration_matched for all three models."""
+    return {m: load_calibration_matched(m) for m in _MODELS}
+
+
+def _load_all_summaries() -> dict[str, pd.DataFrame | None]:
+    """Load calibration_summary for all three models."""
+    return {m: load_calibration_summary(m) for m in _MODELS}
+
+
+def _get_lead_stats(locus: str, model: str, summaries: dict, matched: dict) -> dict:
+    """Extract lead variant stats for a locus/model combo."""
+    stats = {
+        "lead_dll": None, "locus_pctile": None,
+        "null_pctile_signed": None, "null_pctile_abs": None,
+        "lead_maf": None,
+    }
+    cal_s = summaries.get(model)
+    if cal_s is not None:
+        srow = cal_s[cal_s["locus"] == locus]
+        if not srow.empty and srow.iloc[0]["lead_in_scored"]:
+            stats["lead_dll"] = srow.iloc[0]["paper_lead_delta_ll"]
+            stats["locus_pctile"] = srow.iloc[0]["percentile_signed"]
+
+    cal_m = matched.get(model)
+    if cal_m is not None:
+        mrow = cal_m[cal_m["locus"] == locus]
+        if not mrow.empty:
+            stats["null_pctile_signed"] = mrow.iloc[0]["null_percentile_signed"]
+            stats["null_pctile_abs"] = mrow.iloc[0]["null_percentile_abs"]
+            maf_val = mrow.iloc[0].get("lead_maf")
+            if pd.notna(maf_val):
+                stats["lead_maf"] = float(maf_val)
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -366,12 +426,12 @@ def view_locus_detail(available: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Evo 2 per-locus view
+# Evo 2 per-locus view (three-model comparison)
 # ---------------------------------------------------------------------------
 
 
-def view_evo2(model: str) -> None:
-    """Render the Evo 2 tab for the selected locus."""
+def view_evo2() -> None:
+    """Render the Evo 2 tab for the selected locus, showing 1B, 7B, and ensemble."""
     selected_name = st.session_state.get("selected_locus")
     selected_trait = st.session_state.get("selected_trait")
 
@@ -382,199 +442,172 @@ def view_evo2(model: str) -> None:
     paper_info = _PAPER_LEADS.get(selected_name, {})
     paper_lead_rsid = paper_info.get("rsid", "")
 
-    evo2_df = load_evo2_scores(selected_name, selected_trait, model)
-    if evo2_df is None:
+    # Load all three models' scores for this locus
+    evo2_dfs: dict[str, pd.DataFrame] = {}
+    scored_dfs: dict[str, pd.DataFrame] = {}
+    for m in _MODELS:
+        df = load_evo2_scores(selected_name, selected_trait, m)
+        if df is not None:
+            evo2_dfs[m] = df
+            s = df[df["error"] == ""].copy()
+            if not s.empty:
+                scored_dfs[m] = s
+
+    if not scored_dfs:
         st.info(
-            f"No Evo 2 {model.upper()} scores available for this locus. "
+            "No Evo 2 scores available for this locus. "
             "Run `scripts/score_all_loci.py` to generate them."
         )
         return
 
-    scored = evo2_df[evo2_df["error"] == ""].copy()
-    if scored.empty:
-        st.warning("All variants failed scoring.")
-        return
+    # Load calibration data for all models
+    summaries = _load_all_summaries()
+    matched = _load_all_matched()
 
-    # Look up lead stats from calibration data
-    cal_summary = load_calibration_summary(model)
-    cal_matched = load_calibration_matched(model)
+    # Get per-model lead stats
+    model_stats: dict[str, dict] = {}
+    for m in _MODELS:
+        model_stats[m] = _get_lead_stats(selected_name, m, summaries, matched)
 
-    lead_dll = None
-    locus_pctile = None
-    null_pctile_signed = None
-    null_pctile_abs = None
-    lead_maf = None
+    # ── PANEL A: Three-column headline metrics ────────────────────────
+    has_any_lead = any(s["lead_dll"] is not None for s in model_stats.values())
+    if has_any_lead:
+        cols = st.columns(3)
+        for i, m in enumerate(_MODELS):
+            s = model_stats[m]
+            label = _MODEL_LABELS[m]
+            with cols[i]:
+                if m == "ensemble":
+                    st.markdown(f"**:green[{label}]**")
+                else:
+                    st.markdown(f"**{label}**")
+                st.metric(
+                    "delta-ll",
+                    _fmt_dll(s["lead_dll"]),
+                    help="Delta log-likelihood: negative = alt allele disrupts sequence plausibility",
+                )
+                st.metric(
+                    "Matched %ile",
+                    _fmt_pct(s["null_pctile_signed"]),
+                    help="Ranked against MAF-matched variants from across the genome",
+                )
+                st.metric(
+                    "|delta| %ile",
+                    _fmt_pct(s["null_pctile_abs"]),
+                    help="Magnitude of disruption regardless of direction",
+                )
 
-    if cal_summary is not None:
-        srow = cal_summary[cal_summary["locus"] == selected_name]
-        if not srow.empty and srow.iloc[0]["lead_in_scored"]:
-            lead_dll = srow.iloc[0]["paper_lead_delta_ll"]
-            locus_pctile = srow.iloc[0]["percentile_signed"]
+        # Interpretation box (keyed off ensemble)
+        ens = model_stats.get("ensemble", {})
+        pct = ens.get("null_pctile_signed")
+        abs_pct = ens.get("null_pctile_abs")
 
-    if cal_matched is not None:
-        mrow = cal_matched[cal_matched["locus"] == selected_name]
-        if not mrow.empty:
-            null_pctile_signed = mrow.iloc[0]["null_percentile_signed"]
-            null_pctile_abs = mrow.iloc[0]["null_percentile_abs"]
-            lead_maf_val = mrow.iloc[0].get("lead_maf")
-            if pd.notna(lead_maf_val):
-                lead_maf = float(lead_maf_val)
+        # Show range info
+        pcts_1b_7b = [model_stats[m].get("null_pctile_signed") for m in ["1b", "7b"]]
+        pcts_valid = [p for p in pcts_1b_7b if p is not None]
 
-    # ── PANEL A: Headline metrics ──────────────────────────────────────
-    if lead_dll is not None:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(
-            "Lead delta-ll",
-            f"{lead_dll:.2f}",
-            help="Delta log-likelihood: negative = alt allele disrupts sequence plausibility",
-        )
-        c2.metric(
-            "Locus percentile",
-            f"{locus_pctile:.1f}%" if locus_pctile is not None else "--",
-            help="Lower = more disruptive than nearby variants in this locus",
-        )
-        c3.metric(
-            "Genome-wide matched %ile",
-            f"{null_pctile_signed:.1f}%" if null_pctile_signed is not None else "--",
-            help="Ranked against MAF-matched variants from across the genome",
-        )
-        c4.metric(
-            "|delta| matched %ile",
-            f"{null_pctile_abs:.1f}%" if null_pctile_abs is not None else "--",
-            help="Magnitude of disruption regardless of direction",
-        )
-
-        # Interpretation box
-        pct = null_pctile_signed if null_pctile_signed is not None else locus_pctile
-        if selected_name == "APOE" and null_pctile_abs is not None:
+        if selected_name == "APOE" and abs_pct is not None:
             st.info(
                 f"APOE e4 (C) is the ancestral allele; Evo 2 prefers it over the "
                 f"human-specific reference (T). The signed percentile is misleading "
                 f"here -- magnitude is the right metric, and {paper_lead_rsid} ranks "
-                f"in the top {null_pctile_abs:.1f}% by |delta|."
+                f"in the top {abs_pct:.1f}% by |delta|."
             )
         elif pct is not None:
+            range_str = ""
+            if len(pcts_valid) == 2:
+                lo, hi = min(pcts_valid), max(pcts_valid)
+                range_str = f" (1B/7B range: {lo:.0f}%-{hi:.0f}%)"
             if pct < 5:
                 st.success(
-                    f"Strong functional support: ranks in the most disruptive "
-                    f"{pct:.1f}% of MAF-matched genomic variants."
+                    f"Strong functional support: ensemble ranks in the most disruptive "
+                    f"{pct:.1f}% of MAF-matched genomic variants.{range_str}"
                 )
             elif pct < 15:
                 st.info(
-                    f"Moderate functional support: ranks in the more disruptive "
-                    f"tail of MAF-matched variants ({pct:.1f}th percentile)."
+                    f"Moderate functional support: ensemble ranks in the more disruptive "
+                    f"tail of MAF-matched variants ({pct:.1f}th percentile).{range_str}"
                 )
             elif pct < 35:
                 st.info(
-                    f"Weak signal: somewhat more disruptive than typical, but "
-                    f"not extreme ({pct:.1f}th percentile)."
+                    f"Weak signal: ensemble somewhat more disruptive than typical, but "
+                    f"not extreme ({pct:.1f}th percentile).{range_str}"
                 )
             elif pct < 65:
-                msg = (
-                    f"No clear functional signal at this position from Evo 2 "
-                    f"{model.upper()} ({pct:.1f}th percentile)."
+                st.warning(
+                    f"No clear functional signal at this position from Evo 2 ensemble "
+                    f"({pct:.1f}th percentile).{range_str}"
                 )
-                if model == "1b":
-                    msg += (
-                        " This locus is a candidate for re-scoring with Evo 2 7B, "
-                        "which is expected to have better resolution for noncoding "
-                        "regulatory variants."
-                    )
-                st.warning(msg)
             else:
-                msg = (
-                    f"Alt allele scored as more plausible than reference "
+                st.warning(
+                    f"Alt allele scored as more plausible than reference by ensemble "
                     f"({pct:.1f}th percentile); could indicate low constraint, "
-                    f"ancestral allele, or model blind spot."
+                    f"ancestral allele, or model blind spot.{range_str}"
                 )
-                if model == "1b":
-                    msg += (
-                        " Worth re-scoring with 7B to see if the signal direction "
-                        "changes."
-                    )
-                st.warning(msg)
     else:
         st.warning(f"Paper lead {paper_lead_rsid} not found in Evo 2 scored set.")
 
     # ── PANEL B: GWAS vs Evo 2 scatter ─────────────────────────────────
-    # Use finemap parquet as GWAS source (committed to git, always available).
-    # Falls back to data/loci/ parquet if finemap doesn't exist.
-    try:
-        finemap_path = FINEMAP_DIR / f"{selected_name}_{selected_trait}.parquet"
-        gwas_df = None
-        has_pip = False
-        if finemap_path.exists():
-            gwas_df = pd.read_parquet(finemap_path)
-            has_pip = "pip" in gwas_df.columns
-        else:
-            gwas_df = load_loci_parquet(selected_name, selected_trait)
+    # Model selector for scatter y-axis
+    scatter_model = st.selectbox(
+        "Scatter plot model",
+        options=[m for m in _MODELS if m in scored_dfs],
+        index=min(2, len([m for m in _MODELS if m in scored_dfs]) - 1),  # default to ensemble if available
+        format_func=lambda m: _MODEL_LABELS[m],
+        key="scatter_model_select",
+    )
+    scored = scored_dfs.get(scatter_model)
 
-        if gwas_df is not None and "pval" in gwas_df.columns:
-            merged = gwas_df.merge(
-                scored[["pos", "delta_log_likelihood"]],
-                on="pos",
-                how="inner",
-            )
+    if scored is not None:
+        try:
+            finemap_path = FINEMAP_DIR / f"{selected_name}_{selected_trait}.parquet"
+            gwas_df = None
+            has_pip = False
+            if finemap_path.exists():
+                gwas_df = pd.read_parquet(finemap_path)
+                has_pip = "pip" in gwas_df.columns
+            else:
+                gwas_df = load_loci_parquet(selected_name, selected_trait)
 
-            if not merged.empty:
-                merged["neglog10p"] = -np.log10(merged["pval"].clip(lower=1e-300))
-                if has_pip:
-                    merged["pip"] = merged["pip"].fillna(0)
-
-                lead_pos = paper_info.get("pos")
-                is_lead = merged["pos"] == lead_pos
-
-                fig = go.Figure()
-
-                # Background variants
-                bg = merged[~is_lead].reset_index(drop=True)
-                marker_kwargs = dict(
-                    size=6,
-                    line=dict(width=0.3, color="white"),
+            if gwas_df is not None and "pval" in gwas_df.columns:
+                merged = gwas_df.merge(
+                    scored[["pos", "delta_log_likelihood"]],
+                    on="pos",
+                    how="inner",
                 )
-                if has_pip:
-                    marker_kwargs["color"] = bg["pip"].tolist()
-                    marker_kwargs["colorscale"] = "Viridis"
-                    marker_kwargs["cmin"] = 0
-                    marker_kwargs["cmax"] = 1
-                    marker_kwargs["colorbar"] = dict(title="PIP", thickness=12, len=0.6)
-                else:
-                    marker_kwargs["color"] = "#4a90d9"
 
-                fig.add_trace(go.Scatter(
-                    x=bg["neglog10p"],
-                    y=bg["delta_log_likelihood"],
-                    mode="markers",
-                    marker=marker_kwargs,
-                    text=bg.apply(
-                        lambda r: (
-                            f"{r['rsid']}<br>"
-                            f"p = {r['pval']:.2e}<br>"
-                            f"delta_ll = {r['delta_log_likelihood']:.3f}"
-                            + (f"<br>PIP = {r['pip']:.3f}" if has_pip else "")
-                        ),
-                        axis=1,
-                    ),
-                    hoverinfo="text",
-                    name="Variants",
-                ))
+                if not merged.empty:
+                    merged["neglog10p"] = -np.log10(merged["pval"].clip(lower=1e-300))
+                    if has_pip:
+                        merged["pip"] = merged["pip"].fillna(0)
 
-                # Paper lead star
-                lead_data = merged[is_lead]
-                if not lead_data.empty:
+                    lead_pos = paper_info.get("pos")
+                    is_lead = merged["pos"] == lead_pos
+
+                    fig = go.Figure()
+
+                    bg = merged[~is_lead].reset_index(drop=True)
+                    marker_kwargs = dict(
+                        size=6,
+                        line=dict(width=0.3, color="white"),
+                    )
+                    if has_pip:
+                        marker_kwargs["color"] = bg["pip"].tolist()
+                        marker_kwargs["colorscale"] = "Viridis"
+                        marker_kwargs["cmin"] = 0
+                        marker_kwargs["cmax"] = 1
+                        marker_kwargs["colorbar"] = dict(title="PIP", thickness=12, len=0.6)
+                    else:
+                        marker_kwargs["color"] = "#4a90d9"
+
                     fig.add_trace(go.Scatter(
-                        x=lead_data["neglog10p"],
-                        y=lead_data["delta_log_likelihood"],
+                        x=bg["neglog10p"],
+                        y=bg["delta_log_likelihood"],
                         mode="markers",
-                        marker=dict(
-                            size=14,
-                            symbol="star",
-                            color="red",
-                            line=dict(width=1, color="darkred"),
-                        ),
-                        text=lead_data.apply(
+                        marker=marker_kwargs,
+                        text=bg.apply(
                             lambda r: (
-                                f"<b>{paper_lead_rsid}</b> (paper lead)<br>"
+                                f"{r['rsid']}<br>"
                                 f"p = {r['pval']:.2e}<br>"
                                 f"delta_ll = {r['delta_log_likelihood']:.3f}"
                                 + (f"<br>PIP = {r['pip']:.3f}" if has_pip else "")
@@ -582,191 +615,292 @@ def view_evo2(model: str) -> None:
                             axis=1,
                         ),
                         hoverinfo="text",
-                        name="Paper lead",
+                        name="Variants",
                     ))
 
-                # Reference lines
-                fig.add_hline(y=0, line_dash="dot", line_color="#bdc3c7", line_width=1)
-                fig.add_vline(
-                    x=-np.log10(5e-8), line_dash="dot", line_color="#bdc3c7",
-                    line_width=1, annotation_text="p=5e-8",
-                    annotation_position="top right",
-                    annotation_font_size=9, annotation_font_color="#7f8c8d",
-                )
+                    lead_data = merged[is_lead]
+                    if not lead_data.empty:
+                        fig.add_trace(go.Scatter(
+                            x=lead_data["neglog10p"],
+                            y=lead_data["delta_log_likelihood"],
+                            mode="markers",
+                            marker=dict(
+                                size=14,
+                                symbol="star",
+                                color="red",
+                                line=dict(width=1, color="darkred"),
+                            ),
+                            text=lead_data.apply(
+                                lambda r: (
+                                    f"<b>{paper_lead_rsid}</b> (paper lead)<br>"
+                                    f"p = {r['pval']:.2e}<br>"
+                                    f"delta_ll = {r['delta_log_likelihood']:.3f}"
+                                    + (f"<br>PIP = {r['pip']:.3f}" if has_pip else "")
+                                ),
+                                axis=1,
+                            ),
+                            hoverinfo="text",
+                            name="Paper lead",
+                        ))
 
-                fig.update_layout(
-                    title=f"GWAS significance vs Evo 2 {model.upper()} disruption score",
-                    xaxis_title="-log10(p)",
-                    yaxis_title="delta_log_likelihood",
-                    height=400,
-                    margin=dict(l=50, r=20, t=40, b=40),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig, use_container_width=True)
-                st.caption(
-                    "Bottom-right quadrant = high GWAS significance and predicted "
-                    "disruption (negative delta = alt allele less plausible). The most "
-                    "informative position for variants to land if Evo 2 is corroborating "
-                    "the GWAS signal. Star = paper-reported lead variant."
-                )
+                    fig.add_hline(y=0, line_dash="dot", line_color="#bdc3c7", line_width=1)
+                    fig.add_vline(
+                        x=-np.log10(5e-8), line_dash="dot", line_color="#bdc3c7",
+                        line_width=1, annotation_text="p=5e-8",
+                        annotation_position="top right",
+                        annotation_font_size=9, annotation_font_color="#7f8c8d",
+                    )
+
+                    fig.update_layout(
+                        title=f"GWAS significance vs Evo 2 {_MODEL_LABELS[scatter_model]} disruption score",
+                        xaxis_title="-log10(p)",
+                        yaxis_title="delta_log_likelihood",
+                        height=400,
+                        margin=dict(l=50, r=20, t=40, b=40),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption(
+                        "Bottom-right quadrant = high GWAS significance and predicted "
+                        "disruption (negative delta = alt allele less plausible). Star = paper lead."
+                    )
+                else:
+                    st.warning("No variants overlap between GWAS and Evo 2 scored data.")
             else:
-                st.warning("No variants overlap between GWAS and Evo 2 scored data.")
-        else:
-            st.warning("No GWAS data available for scatter plot.")
-    except Exception as exc:
-        st.error(f"Error rendering GWAS vs Evo 2 scatter: {exc}")
+                st.warning("No GWAS data available for scatter plot.")
+        except Exception as exc:
+            st.error(f"Error rendering GWAS vs Evo 2 scatter: {exc}")
 
-    # ── PANEL C: Locus null distribution ───────────────────────────────
-    dll = scored["delta_log_likelihood"]
+    # ── PANEL C: Dual histogram (1B vs 7B) ─────────────────────────────
+    scored_1b = scored_dfs.get("1b")
+    scored_7b = scored_dfs.get("7b")
 
-    # X-axis range: 1st-99th percentile of locus data with 10% padding
-    locus_lo, locus_hi = float(np.percentile(dll, 1)), float(np.percentile(dll, 99))
-    pad = (locus_hi - locus_lo) * 0.10
-    x_range = [locus_lo - pad, locus_hi + pad]
+    if scored_1b is not None and scored_7b is not None:
+        dll_1b = scored_1b["delta_log_likelihood"]
+        dll_7b = scored_7b["delta_log_likelihood"]
+        n_variants = max(len(dll_1b), len(dll_7b))
 
-    fig_hist = go.Figure()
+        # X-axis range: 1st-99th percentile of combined data with 10% padding
+        combined = pd.concat([dll_1b, dll_7b])
+        locus_lo, locus_hi = float(np.percentile(combined, 1)), float(np.percentile(combined, 99))
+        pad = (locus_hi - locus_lo) * 0.10
+        x_range = [locus_lo - pad, locus_hi + pad]
 
-    # Null overlay (outline only, density normalized)
-    null_maf_bin = None
-    null_df = load_genome_null(model)
-    if null_df is not None and cal_matched is not None:
-        mrow = cal_matched[cal_matched["locus"] == selected_name]
-        if not mrow.empty and pd.notna(mrow.iloc[0].get("maf_bin")):
-            null_maf_bin = int(mrow.iloc[0]["maf_bin"])
-            null_scored_bin = null_df[
-                (null_df["error"] == "") & (null_df["maf_bin"] == null_maf_bin)
-            ]["delta_log_likelihood"]
-            if not null_scored_bin.empty:
-                fig_hist.add_trace(go.Histogram(
-                    x=null_scored_bin,
-                    nbinsx=60,
-                    name=f"Genome null (MAF bin {null_maf_bin}, reference)",
-                    marker=dict(
-                        color="rgba(0, 0, 0, 0)",
-                        line=dict(color="rgba(120, 120, 120, 0.5)", width=1.5),
-                    ),
-                    histnorm="probability density",
-                ))
+        fig_hist = go.Figure()
 
-    fig_hist.add_trace(go.Histogram(
-        x=dll,
-        nbinsx=60,
-        name=f"{selected_name} variants",
-        marker_color="rgba(70, 130, 200, 0.7)",
-        histnorm="probability density",
-    ))
+        # Null overlay (outline only, from ensemble null)
+        null_maf_bin = None
+        cal_m_ens = matched.get("ensemble")
+        null_df = load_genome_null("ensemble")
+        if null_df is not None and cal_m_ens is not None:
+            mrow = cal_m_ens[cal_m_ens["locus"] == selected_name]
+            if not mrow.empty and pd.notna(mrow.iloc[0].get("maf_bin")):
+                null_maf_bin = int(mrow.iloc[0]["maf_bin"])
+                null_scored_bin = null_df[
+                    (null_df["error"] == "") & (null_df["maf_bin"] == null_maf_bin)
+                ]["delta_log_likelihood"]
+                if not null_scored_bin.empty:
+                    fig_hist.add_trace(go.Histogram(
+                        x=null_scored_bin,
+                        nbinsx=60,
+                        name=f"Genome null (MAF bin {null_maf_bin})",
+                        marker=dict(
+                            color="rgba(0, 0, 0, 0)",
+                            line=dict(color="rgba(120, 120, 120, 0.5)", width=1.5),
+                        ),
+                        histnorm="probability density",
+                    ))
 
-    if lead_dll is not None:
-        # Smart label placement: left if lead is in rightmost 20%, right if leftmost 20%
+        # 1B histogram
+        fig_hist.add_trace(go.Histogram(
+            x=dll_1b,
+            nbinsx=60,
+            name="1B locus distribution",
+            marker_color="rgba(70, 130, 200, 0.6)",
+            histnorm="probability density",
+        ))
+
+        # 7B histogram
+        fig_hist.add_trace(go.Histogram(
+            x=dll_7b,
+            nbinsx=60,
+            name="7B locus distribution",
+            marker_color="rgba(230, 126, 34, 0.6)",
+            histnorm="probability density",
+        ))
+
+        # Lead variant lines
+        stats_1b = model_stats.get("1b", {})
+        stats_7b = model_stats.get("7b", {})
+        stats_ens = model_stats.get("ensemble", {})
+
         x_span = x_range[1] - x_range[0]
-        if lead_dll > x_range[0] + 0.8 * x_span:
-            ann_pos = "top left"
-        elif lead_dll < x_range[0] + 0.2 * x_span:
-            ann_pos = "top right"
-        else:
-            ann_pos = "top right"
 
-        ann_text = f"{paper_lead_rsid}\n{locus_pctile:.1f}%ile" if locus_pctile else paper_lead_rsid
-        fig_hist.add_vline(
-            x=lead_dll,
-            line_dash="dash",
-            line_color="#d94a4a",
-            annotation_text=ann_text,
-            annotation_position=ann_pos,
+        if stats_1b.get("lead_dll") is not None:
+            dll_val = stats_1b["lead_dll"]
+            pct_val = stats_1b.get("locus_pctile")
+            ann_text = f"1B: {dll_val:.1f}"
+            if pct_val is not None:
+                ann_text += f" ({pct_val:.0f}%ile)"
+            ann_pos = "top left" if dll_val > x_range[0] + 0.7 * x_span else "top right"
+            fig_hist.add_vline(
+                x=dll_val, line_dash="solid", line_color="steelblue", line_width=2,
+                annotation_text=ann_text, annotation_position=ann_pos,
+                annotation_font_size=10, annotation_font_color="steelblue",
+            )
+
+        if stats_7b.get("lead_dll") is not None:
+            dll_val = stats_7b["lead_dll"]
+            pct_val = stats_7b.get("locus_pctile")
+            ann_text = f"7B: {dll_val:.1f}"
+            if pct_val is not None:
+                ann_text += f" ({pct_val:.0f}%ile)"
+            ann_pos = "bottom left" if dll_val > x_range[0] + 0.7 * x_span else "bottom right"
+            fig_hist.add_vline(
+                x=dll_val, line_dash="solid", line_color="#e67e22", line_width=2,
+                annotation_text=ann_text, annotation_position=ann_pos,
+                annotation_font_size=10, annotation_font_color="#e67e22",
+            )
+
+        if stats_ens.get("lead_dll") is not None:
+            dll_val = stats_ens["lead_dll"]
+            fig_hist.add_vline(
+                x=dll_val, line_dash="dash", line_color="#2ecc71", line_width=2,
+                annotation_text=f"Ens: {dll_val:.1f}",
+                annotation_position="top right",
+                annotation_font_size=10, annotation_font_color="#2ecc71",
+            )
+
+        fig_hist.update_layout(
+            title=f"Locus null distribution ({selected_name}, n={n_variants}) -- 1B vs 7B",
+            xaxis_title="delta_log_likelihood",
+            yaxis_title="Density",
+            height=400,
+            margin=dict(l=50, r=20, t=40, b=40),
+            barmode="overlay",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
+        fig_hist.update_xaxes(range=x_range)
 
-    fig_hist.update_layout(
-        title=f"Locus null distribution ({selected_name}, n={len(dll)})",
-        xaxis_title="delta_log_likelihood",
-        yaxis_title="Density",
-        height=350,
-        margin=dict(l=50, r=20, t=40, b=40),
-        barmode="overlay",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    fig_hist.update_xaxes(range=x_range)
+        if null_maf_bin is not None:
+            fig_hist.add_annotation(
+                x=x_range[1], y=1, xref="x", yref="paper",
+                text="Genome null clipped to locus range",
+                showarrow=False, font=dict(size=9, color="#999"),
+                xanchor="right", yanchor="top",
+            )
 
-    # Annotation noting the null is clipped to locus range
-    if null_maf_bin is not None:
-        fig_hist.add_annotation(
-            x=x_range[1], y=1, xref="x", yref="paper",
-            text="Genome null clipped to locus range",
-            showarrow=False, font=dict(size=9, color="#999"),
-            xanchor="right", yanchor="top",
+        st.plotly_chart(fig_hist, use_container_width=True)
+    elif scored_dfs:
+        # Fallback: show single-model histogram if only one model available
+        m = list(scored_dfs.keys())[0]
+        dll = scored_dfs[m]["delta_log_likelihood"]
+        locus_lo, locus_hi = float(np.percentile(dll, 1)), float(np.percentile(dll, 99))
+        pad = (locus_hi - locus_lo) * 0.10
+        x_range = [locus_lo - pad, locus_hi + pad]
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Histogram(
+            x=dll, nbinsx=60, name=f"{_MODEL_LABELS[m]} variants",
+            marker_color="rgba(70, 130, 200, 0.7)", histnorm="probability density",
+        ))
+        fig_hist.update_layout(
+            title=f"Locus null distribution ({selected_name}, n={len(dll)})",
+            xaxis_title="delta_log_likelihood", yaxis_title="Density",
+            height=350, margin=dict(l=50, r=20, t=40, b=40),
         )
-
-    st.plotly_chart(fig_hist, use_container_width=True)
+        fig_hist.update_xaxes(range=x_range)
+        st.plotly_chart(fig_hist, use_container_width=True)
 
     # ── PANEL D: Methodology note ──────────────────────────────────────
     with st.expander("Methodology"):
-        st.markdown(f"""
+        st.markdown("""
 **Delta log-likelihood** measures how much a single-nucleotide variant
 changes the DNA sequence model's predicted probability. A negative value
 means the alt allele makes the sequence less plausible (predicted disruptive);
 positive means more plausible.
 
 - **Window size**: 8,192 bp centered on the variant
-- **Model**: Evo 2 {model.upper()} (StripedHyena 2 architecture)
+- **Models**: Evo 2 1B and 7B (StripedHyena 2 architecture); ensemble = mean of both
 - **Locus null**: all scored SNVs in the locus window (typically 2,000-3,000)
 - **Genome-wide null**: ~6,400 random biallelic SNVs from 1000G EUR,
   stratified by MAF (800 per bin), excluding locus regions
+- **Model agreement**: Global Spearman rho = 0.695 between 1B and 7B on the
+  genome-wide null. All seven leads are direction-concordant. Ensemble
+  reduces per-model noise, especially in the 5%-25% range.
 - **Reference**: [Evo 2 (Nguyen et al., 2025)](https://arcinstitute.org/tools/evo/evo-2)
-
-**Caveat**: The 1B model has limited noncoding resolution. Regulatory and
-intronic variants may not show strong signal until the 7B or 40B models
-are scored.
 """)
 
 
 # ---------------------------------------------------------------------------
-# Calibration cross-locus view
+# Calibration cross-locus view (three-model comparison)
 # ---------------------------------------------------------------------------
 
 
-def view_calibration(model: str) -> None:
-    """Render the cross-locus calibration tab."""
-    cal_matched = load_calibration_matched(model)
-    if cal_matched is None:
-        st.info(
-            f"No calibration data for Evo 2 {model.upper()}. "
-            "Run the scoring pipeline first."
-        )
+def view_calibration() -> None:
+    """Render the cross-locus calibration tab with 1B, 7B, and ensemble."""
+    all_matched = _load_all_matched()
+
+    # Check we have at least one model
+    available = {m: df for m, df in all_matched.items() if df is not None}
+    if not available:
+        st.info("No calibration data available. Run the scoring pipeline first.")
         return
 
     st.markdown(
-        f"Evo 2 {model.upper()} scoring of all seven paper lead variants. "
-        "APOE serves as a positive control (coding missense, top 0.1% by |delta|). "
-        "The other six loci are noncoding regulatory variants where 1B "
-        "resolution is known to be limited."
+        "Evo 2 scoring of all seven paper lead variants across 1B, 7B, and ensemble models. "
+        "APOE serves as a positive control (coding missense). "
+        "The Range column shows the spread between single-model percentiles."
     )
 
-    # ── Calibration table ──────────────────────────────────────────────
+    # ── Three-model calibration table ─────────────────────────────────
     display_rows = []
-    for _, r in cal_matched.iterrows():
-        pct = r["null_percentile_signed"]
-        if pd.notna(pct):
-            if pct < 15:
-                badge = "\U0001f7e2"
-            elif pct < 35:
-                badge = "\U0001f7e1"
-            elif pct < 65:
-                badge = "\u26aa"
-            else:
-                badge = "\U0001f534"
-        else:
-            badge = "--"
+    for locus_name, paper_info in _PAPER_LEADS.items():
+        row = {
+            "Locus": locus_name,
+            "Trait": paper_info["trait"],
+            "Lead rsid": paper_info["rsid"],
+        }
 
-        display_rows.append({
-            "Locus": r["locus"],
-            "Trait": r["trait"],
-            "Lead rsid": r["lead_rsid"],
-            "MAF": f"{r['lead_maf']:.4f}" if pd.notna(r.get("lead_maf")) else "--",
-            "delta-ll": f"{r['lead_delta_ll']:.4f}" if pd.notna(r["lead_delta_ll"]) else "--",
-            "Locus %ile": f"{r['locus_percentile_signed']:.1f}%" if pd.notna(r.get("locus_percentile_signed")) else "--",
-            "Matched %ile": f"{pct:.1f}%" if pd.notna(pct) else "--",
-            "|delta| %ile": f"{r['null_percentile_abs']:.1f}%" if pd.notna(r.get("null_percentile_abs")) else "--",
-            "Signal": badge,
-        })
+        # MAF (same across models)
+        maf_shown = False
+        for m in _MODELS:
+            df = all_matched.get(m)
+            if df is not None:
+                mrow = df[df["locus"] == locus_name]
+                if not mrow.empty and pd.notna(mrow.iloc[0].get("lead_maf")):
+                    row["MAF"] = f"{mrow.iloc[0]['lead_maf']:.4f}"
+                    maf_shown = True
+                    break
+        if not maf_shown:
+            row["MAF"] = "--"
+
+        pcts_for_range = []
+        for m in _MODELS:
+            label = _MODEL_LABELS[m]
+            df = all_matched.get(m)
+            if df is not None:
+                mrow = df[df["locus"] == locus_name]
+                if not mrow.empty:
+                    dll = mrow.iloc[0]["lead_delta_ll"]
+                    pct = mrow.iloc[0]["null_percentile_signed"]
+                    row[f"{label} delta"] = _fmt_dll(dll)
+                    row[f"{label} match%"] = _fmt_pct(pct)
+                    if m in ("1b", "7b") and pd.notna(pct):
+                        pcts_for_range.append(pct)
+                else:
+                    row[f"{label} delta"] = "--"
+                    row[f"{label} match%"] = "--"
+            else:
+                row[f"{label} delta"] = "--"
+                row[f"{label} match%"] = "--"
+
+        if len(pcts_for_range) == 2:
+            lo, hi = min(pcts_for_range), max(pcts_for_range)
+            row["Range"] = f"{lo:.0f}% - {hi:.0f}%"
+        else:
+            row["Range"] = "--"
+
+        display_rows.append(row)
 
     display_df = pd.DataFrame(display_rows)
     st.dataframe(
@@ -774,131 +908,174 @@ def view_calibration(model: str) -> None:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Signal": st.column_config.TextColumn(width="small"),
-            "Matched %ile": st.column_config.TextColumn(width="small"),
-            "|delta| %ile": st.column_config.TextColumn(width="small"),
-            "Locus %ile": st.column_config.TextColumn(width="small"),
+            "MAF": st.column_config.TextColumn(width="small"),
+            "1B delta": st.column_config.TextColumn(width="small"),
+            "1B match%": st.column_config.TextColumn(width="small"),
+            "7B delta": st.column_config.TextColumn(width="small"),
+            "7B match%": st.column_config.TextColumn(width="small"),
+            "Ensemble delta": st.column_config.TextColumn(width="small"),
+            "Ensemble match%": st.column_config.TextColumn(width="small"),
+            "Range": st.column_config.TextColumn(width="small"),
         },
     )
-    st.caption(
-        "**Signal key:** "
-        "\U0001f7e2 matched %ile < 15% (moderate+) "
-        "\U0001f7e1 15-35% (weak) "
-        "\u26aa 35-65% (no signal) "
-        "\U0001f534 > 65% (wrong direction)"
-    )
 
-    # ── Comparison dot plot ────────────────────────────────────────────
-    plot_df = cal_matched.dropna(
-        subset=["locus_percentile_signed", "null_percentile_signed"]
-    ).copy()
+    # ── Three-marker comparison dot plot ──────────────────────────────
+    # Build plot data from all three models
+    cal_ens = all_matched.get("ensemble")
+    cal_1b = all_matched.get("1b")
+    cal_7b = all_matched.get("7b")
 
-    if not plot_df.empty:
-        plot_df = plot_df.sort_values("null_percentile_signed", ascending=False)
-        trait_colors = {"mortality": "#c0392b", "hy3": "#2980b9"}
+    if cal_ens is not None:
+        # Sort by ensemble percentile
+        plot_base = cal_ens.dropna(subset=["null_percentile_signed"]).copy()
+        plot_base = plot_base.sort_values("null_percentile_signed", ascending=False)
 
-        fig = go.Figure()
+        if not plot_base.empty:
+            trait_colors = {"mortality": "#c0392b", "hy3": "#2980b9"}
 
-        # Reference lines
-        for pct in [5, 15, 50]:
-            fig.add_vline(x=pct, line_dash="dot", line_color="#bdc3c7")
-            fig.add_annotation(
-                x=pct, y=len(plot_df) - 0.3,
-                text=f"{pct}%", showarrow=False,
-                font=dict(size=10, color="#7f8c8d"),
-            )
+            fig = go.Figure()
 
-        loci_names = plot_df["locus"].tolist()
-        for idx, (_, r) in enumerate(plot_df.iterrows()):
-            color = trait_colors.get(r["trait"], "#333")
+            # Reference lines
+            for pct in [5, 15, 50]:
+                fig.add_vline(x=pct, line_dash="dot", line_color="#bdc3c7")
+                fig.add_annotation(
+                    x=pct, y=len(plot_base) - 0.3,
+                    text=f"{pct}%", showarrow=False,
+                    font=dict(size=10, color="#7f8c8d"),
+                )
 
-            # Connecting line
-            fig.add_trace(go.Scatter(
-                x=[r["locus_percentile_signed"], r["null_percentile_signed"]],
-                y=[idx, idx],
-                mode="lines",
-                line=dict(color=color, width=1),
-                showlegend=False,
-                hoverinfo="skip",
-            ))
+            loci_names = plot_base["locus"].tolist()
+            for idx, (_, r_ens) in enumerate(plot_base.iterrows()):
+                locus = r_ens["locus"]
+                trait = r_ens["trait"]
+                color = trait_colors.get(trait, "#333")
 
-            # Locus percentile (open diamond)
-            fig.add_trace(go.Scatter(
-                x=[r["locus_percentile_signed"]],
-                y=[idx],
-                mode="markers",
-                marker=dict(
-                    size=10, symbol="diamond-open",
-                    color=color, line=dict(width=2, color=color),
+                # Get percentiles for all three models
+                pct_ens = r_ens["null_percentile_signed"]
+                pct_1b = None
+                pct_7b = None
+                if cal_1b is not None:
+                    r1b = cal_1b[cal_1b["locus"] == locus]
+                    if not r1b.empty:
+                        pct_1b = r1b.iloc[0]["null_percentile_signed"]
+                if cal_7b is not None:
+                    r7b = cal_7b[cal_7b["locus"] == locus]
+                    if not r7b.empty:
+                        pct_7b = r7b.iloc[0]["null_percentile_signed"]
+
+                # Connecting line across all available points
+                all_pcts = [p for p in [pct_1b, pct_7b, pct_ens] if pd.notna(p)]
+                if len(all_pcts) >= 2:
+                    fig.add_trace(go.Scatter(
+                        x=[min(all_pcts), max(all_pcts)],
+                        y=[idx, idx],
+                        mode="lines",
+                        line=dict(color=color, width=1.5),
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ))
+
+                # 1B (open circle)
+                if pd.notna(pct_1b):
+                    fig.add_trace(go.Scatter(
+                        x=[pct_1b], y=[idx],
+                        mode="markers",
+                        marker=dict(
+                            size=9, symbol="circle-open",
+                            color=color, line=dict(width=2, color=color),
+                        ),
+                        text=f"{locus} 1B: {pct_1b:.1f}%",
+                        hoverinfo="text",
+                        showlegend=False,
+                    ))
+
+                # 7B (filled circle)
+                if pd.notna(pct_7b):
+                    fig.add_trace(go.Scatter(
+                        x=[pct_7b], y=[idx],
+                        mode="markers",
+                        marker=dict(size=9, color=color),
+                        text=f"{locus} 7B: {pct_7b:.1f}%",
+                        hoverinfo="text",
+                        showlegend=False,
+                    ))
+
+                # Ensemble (star)
+                if pd.notna(pct_ens):
+                    fig.add_trace(go.Scatter(
+                        x=[pct_ens], y=[idx],
+                        mode="markers",
+                        marker=dict(
+                            size=12, symbol="star",
+                            color=color, line=dict(width=1, color=color),
+                        ),
+                        text=f"{locus} ensemble: {pct_ens:.1f}%",
+                        hoverinfo="text",
+                        showlegend=False,
+                    ))
+
+            # Legend traces
+            for trait, color in trait_colors.items():
+                label = "Mortality" if trait == "mortality" else "HY3+"
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    marker=dict(size=9, symbol="circle-open", color=color,
+                                line=dict(width=2, color=color)),
+                    name=f"{label} (1B)",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    marker=dict(size=9, color=color),
+                    name=f"{label} (7B)",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[None], y=[None], mode="markers",
+                    marker=dict(size=12, symbol="star", color=color,
+                                line=dict(width=1, color=color)),
+                    name=f"{label} (Ensemble)",
+                ))
+
+            fig.update_layout(
+                title=(
+                    "Where do the seven paper lead variants fall in their Evo 2 "
+                    "score distributions? (1B, 7B, and ensemble)"
                 ),
-                text=f"{r['locus']} locus: {r['locus_percentile_signed']:.1f}%",
-                hoverinfo="text",
-                showlegend=False,
-            ))
-
-            # Genome-wide (filled circle)
-            fig.add_trace(go.Scatter(
-                x=[r["null_percentile_signed"]],
-                y=[idx],
-                mode="markers",
-                marker=dict(size=10, color=color),
-                text=f"{r['locus']} genome: {r['null_percentile_signed']:.1f}%",
-                hoverinfo="text",
-                showlegend=False,
-            ))
-
-        # Legend traces (invisible data, visible legend)
-        for trait, color in trait_colors.items():
-            label = "Mortality" if trait == "mortality" else "HY3+"
-            fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode="markers",
-                marker=dict(size=10, color=color),
-                name=f"{label} (genome)",
-            ))
-            fig.add_trace(go.Scatter(
-                x=[None], y=[None], mode="markers",
-                marker=dict(size=10, symbol="diamond-open", color=color,
-                            line=dict(width=2, color=color)),
-                name=f"{label} (locus)",
-            ))
-
-        fig.update_layout(
-            title="Where do the seven paper lead variants fall in their Evo 2 score distributions?",
-            xaxis_title="Signed percentile (0% = most disruptive)",
-            xaxis_range=[-5, 105],
-            yaxis=dict(
-                tickvals=list(range(len(loci_names))),
-                ticktext=loci_names,
-            ),
-            height=max(300, len(plot_df) * 55),
-            margin=dict(l=80, r=20, t=50, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+                xaxis_title="Signed percentile (0% = most disruptive)",
+                xaxis_range=[-5, 105],
+                yaxis=dict(
+                    tickvals=list(range(len(loci_names))),
+                    ticktext=loci_names,
+                ),
+                height=max(300, len(plot_base) * 60),
+                margin=dict(l=80, r=20, t=50, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
     # ── Headline observations ──────────────────────────────────────────
     st.markdown("### Headline observations")
     st.markdown("""
-- **APOE** is the strongest signal (top 0.1% by |delta|), confirming method
-  calibration on coding variants
-- **ASNS** (the variant LD-based fine-mapping cannot resolve) ranks in the
-  top 7.5% against a MAF-matched null, providing independent functional support
-- **TBXAS1** shows no signal in 1B despite being the second-strongest paper
-  hit, consistent with its eQTL/regulatory mechanism -- candidate for 7B re-scoring
+- **APOE** is the strongest signal (top 0.1% by |delta| in both models),
+  confirming method calibration on coding variants
+- **ASNS** (the variant LD-based fine-mapping cannot resolve) ranks at
+  ensemble 11.0% against a MAF-matched null, providing independent
+  functional support
+- **TBXAS1** shows no signal in either 1B or 7B (ensemble 48.9%), consistent
+  with its eQTL/regulatory mechanism
 - Overall, signal magnitude correlates with variant class (coding >
   intronic-near-coding > regulatory) more than with GWAS p-value
-- 7B and 40B are expected to improve noncoding resolution; results for those
-  models will appear in this view when available
+- 1B/7B global Spearman rho = 0.695; the ensemble reduces per-model noise,
+  especially in the 5%-25% percentile range where model choice matters most
 """)
 
 
 # ---------------------------------------------------------------------------
-# Benchmark view (updated with Evo 2 columns)
+# Benchmark view (three-model Evo 2 columns)
 # ---------------------------------------------------------------------------
 
 
-def view_benchmark(model: str) -> None:
-    """Render the benchmark comparison table."""
+def view_benchmark() -> None:
+    """Render the benchmark comparison table with 1B, 7B, and ensemble Evo 2 columns."""
     summary = load_summary()
     if summary is None:
         st.error(
@@ -913,15 +1090,20 @@ def view_benchmark(model: str) -> None:
         "against the lead variants reported in Tan et al. (2024)."
     )
 
-    # Load Evo 2 calibration for extra columns
-    cal_matched = load_calibration_matched(model)
-    evo2_lookup: dict[str, dict] = {}
-    if cal_matched is not None:
-        for _, r in cal_matched.iterrows():
-            evo2_lookup[r["locus"]] = {
-                "delta_ll": r["lead_delta_ll"],
-                "matched_pct": r["null_percentile_signed"],
-            }
+    # Load Evo 2 calibration for all three models
+    all_matched = _load_all_matched()
+    evo2_lookup: dict[str, dict[str, dict]] = {}  # locus -> model -> {delta_ll, matched_pct}
+    for m in _MODELS:
+        df = all_matched.get(m)
+        if df is not None:
+            for _, r in df.iterrows():
+                locus = r["locus"]
+                if locus not in evo2_lookup:
+                    evo2_lookup[locus] = {}
+                evo2_lookup[locus][m] = {
+                    "delta_ll": r["lead_delta_ll"],
+                    "matched_pct": r["null_percentile_signed"],
+                }
 
     # Build display table
     rows: list[dict] = []
@@ -961,11 +1143,8 @@ def view_benchmark(model: str) -> None:
         lead_pip = r.get("paper_lead_pip")
         lead_pip_str = f"{lead_pip:.4f}" if pd.notna(lead_pip) else "N/A"
 
-        # Evo 2 columns
         locus_name = r["locus"]
-        evo2_info = evo2_lookup.get(locus_name, {})
-        dll = evo2_info.get("delta_ll")
-        mpct = evo2_info.get("matched_pct")
+        locus_evo2 = evo2_lookup.get(locus_name, {})
 
         row_dict = {
             "Locus": locus_name,
@@ -977,30 +1156,41 @@ def view_benchmark(model: str) -> None:
             "Lead in CS": lead_cs,
             "Lead PIP": lead_pip_str,
             "CS Size": cs_str,
-            "Ref MAF (1KG EUR)": maf_str,
-            f"Evo 2 {model.upper()} delta": f"{dll:.2f}" if pd.notna(dll) else "--",
-            f"Evo 2 {model.upper()} %ile": f"{mpct:.1f}%" if pd.notna(mpct) else "--",
-            "Status": status_badge,
+            "Ref MAF": maf_str,
         }
+
+        for m in _MODELS:
+            label = _MODEL_LABELS[m]
+            info = locus_evo2.get(m, {})
+            dll = info.get("delta_ll")
+            mpct = info.get("matched_pct")
+            row_dict[f"{label} delta"] = _fmt_dll(dll)
+            row_dict[f"{label} %ile"] = _fmt_pct(mpct)
+
+        row_dict["Status"] = status_badge
         rows.append(row_dict)
 
     bench_df = pd.DataFrame(rows)
+
+    col_config = {
+        "Status": st.column_config.TextColumn(width="medium"),
+        "Paper p-value": st.column_config.TextColumn(width="small"),
+        "Top PIP": st.column_config.TextColumn(width="small"),
+        "Lead PIP": st.column_config.TextColumn(width="small"),
+        "Lead in CS": st.column_config.TextColumn(width="small"),
+        "CS Size": st.column_config.TextColumn(width="small"),
+        "Ref MAF": st.column_config.TextColumn(width="small"),
+    }
+    for m in _MODELS:
+        label = _MODEL_LABELS[m]
+        col_config[f"{label} delta"] = st.column_config.TextColumn(width="small")
+        col_config[f"{label} %ile"] = st.column_config.TextColumn(width="small")
 
     st.dataframe(
         bench_df,
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "Status": st.column_config.TextColumn(width="medium"),
-            "Paper p-value": st.column_config.TextColumn(width="small"),
-            "Top PIP": st.column_config.TextColumn(width="small"),
-            "Lead PIP": st.column_config.TextColumn(width="small"),
-            "Lead in CS": st.column_config.TextColumn(width="small"),
-            "CS Size": st.column_config.TextColumn(width="small"),
-            "Ref MAF (1KG EUR)": st.column_config.TextColumn(width="small"),
-            f"Evo 2 {model.upper()} delta": st.column_config.TextColumn(width="small"),
-            f"Evo 2 {model.upper()} %ile": st.column_config.TextColumn(width="small"),
-        },
+        column_config=col_config,
     )
 
     # Status legend
@@ -1046,22 +1236,6 @@ def main() -> None:
     with st.sidebar:
         st.header("Navigation")
 
-        # Model selector
-        available_models = list_available_models()
-        if not available_models:
-            available_models = ["1b"]
-        selected_model = st.selectbox(
-            "Evo 2 model",
-            options=available_models,
-            index=0,
-            help=(
-                "Larger models give better noncoding resolution. "
-                "7B and 40B results will appear here when available."
-            ),
-        )
-
-        st.divider()
-
         locus_names = sorted({loc["name"] for loc in available})
         selected_name = st.selectbox("Locus", locus_names)
         st.session_state["selected_locus"] = selected_name
@@ -1087,13 +1261,13 @@ def main() -> None:
         view_locus_detail(available)
 
     with tab_evo2:
-        view_evo2(selected_model)
+        view_evo2()
 
     with tab_calibration:
-        view_calibration(selected_model)
+        view_calibration()
 
     with tab_benchmark:
-        view_benchmark(selected_model)
+        view_benchmark()
 
 
 if __name__ == "__main__":
