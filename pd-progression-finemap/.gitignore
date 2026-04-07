@@ -8,3 +8,5 @@ data/cache/
 __pycache__/
 *.pyc
 .venv/
+data/evo2/
+data/reference/

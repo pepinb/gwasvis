@@ -13,6 +13,9 @@ dependencies = [
     "streamlit",
     "tabulate",
     "pytest",
+    "modal",
+    "pyfaidx",
+    "matplotlib",
 ]
 
 [dependency-groups]
