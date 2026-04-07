@@ -625,10 +625,10 @@ def view_evo2() -> None:
                             y=lead_data["delta_log_likelihood"],
                             mode="markers",
                             marker=dict(
-                                size=14,
+                                size=20,
                                 symbol="star",
                                 color="red",
-                                line=dict(width=1, color="darkred"),
+                                line=dict(width=2, color="red"),
                             ),
                             text=lead_data.apply(
                                 lambda r: (
@@ -651,6 +651,9 @@ def view_evo2() -> None:
                         annotation_font_size=9, annotation_font_color="#7f8c8d",
                     )
 
+                    # Ensure paper lead is always visible on x-axis
+                    lead_nlp = float(lead_data["neglog10p"].iloc[0]) if not lead_data.empty else 0
+                    max_x = max(float(merged["neglog10p"].max()), lead_nlp) + 0.5
                     fig.update_layout(
                         title=f"GWAS significance vs Evo 2 {_MODEL_LABELS[scatter_model]} disruption score",
                         xaxis_title="-log10(p)",
@@ -659,6 +662,7 @@ def view_evo2() -> None:
                         margin=dict(l=50, r=20, t=40, b=40),
                         showlegend=False,
                     )
+                    fig.update_xaxes(range=[0, max_x])
                     st.plotly_chart(fig, use_container_width=True)
                     st.caption(
                         "Bottom-right quadrant = high GWAS significance and predicted "
@@ -729,46 +733,39 @@ def view_evo2() -> None:
             histnorm="probability density",
         ))
 
-        # Lead variant lines
+        # Lead variant lines with staggered labels to avoid collision
         stats_1b = model_stats.get("1b", {})
         stats_7b = model_stats.get("7b", {})
         stats_ens = model_stats.get("ensemble", {})
 
-        x_span = x_range[1] - x_range[0]
-
+        # Vertical lines (no built-in annotations — we add explicit annotations below)
+        line_specs = []
         if stats_1b.get("lead_dll") is not None:
-            dll_val = stats_1b["lead_dll"]
-            pct_val = stats_1b.get("locus_pctile")
-            ann_text = f"1B: {dll_val:.1f}"
-            if pct_val is not None:
-                ann_text += f" ({pct_val:.0f}%ile)"
-            ann_pos = "top left" if dll_val > x_range[0] + 0.7 * x_span else "top right"
-            fig_hist.add_vline(
-                x=dll_val, line_dash="solid", line_color="steelblue", line_width=2,
-                annotation_text=ann_text, annotation_position=ann_pos,
-                annotation_font_size=10, annotation_font_color="steelblue",
-            )
-
+            pct_1b = stats_1b.get("null_pctile_signed")
+            label = f"1B ({pct_1b:.0f}%)" if pct_1b is not None else "1B"
+            line_specs.append((stats_1b["lead_dll"], "solid", "steelblue", label, 0.95))
         if stats_7b.get("lead_dll") is not None:
-            dll_val = stats_7b["lead_dll"]
-            pct_val = stats_7b.get("locus_pctile")
-            ann_text = f"7B: {dll_val:.1f}"
-            if pct_val is not None:
-                ann_text += f" ({pct_val:.0f}%ile)"
-            ann_pos = "bottom left" if dll_val > x_range[0] + 0.7 * x_span else "bottom right"
-            fig_hist.add_vline(
-                x=dll_val, line_dash="solid", line_color="#e67e22", line_width=2,
-                annotation_text=ann_text, annotation_position=ann_pos,
-                annotation_font_size=10, annotation_font_color="#e67e22",
-            )
-
+            pct_7b = stats_7b.get("null_pctile_signed")
+            label = f"7B ({pct_7b:.0f}%)" if pct_7b is not None else "7B"
+            line_specs.append((stats_7b["lead_dll"], "solid", "#e67e22", label, 0.85))
         if stats_ens.get("lead_dll") is not None:
-            dll_val = stats_ens["lead_dll"]
+            pct_ens = stats_ens.get("null_pctile_signed")
+            label = f"Ens ({pct_ens:.0f}%)" if pct_ens is not None else "Ens"
+            line_specs.append((stats_ens["lead_dll"], "dash", "#2ecc71", label, 0.75))
+
+        for dll_val, dash, color, label, y_pos in line_specs:
             fig_hist.add_vline(
-                x=dll_val, line_dash="dash", line_color="#2ecc71", line_width=2,
-                annotation_text=f"Ens: {dll_val:.1f}",
-                annotation_position="top right",
-                annotation_font_size=10, annotation_font_color="#2ecc71",
+                x=dll_val, line_dash=dash, line_color=color, line_width=2,
+            )
+            # Place label at right of line if in left half, else left of line
+            x_mid = (x_range[0] + x_range[1]) / 2
+            fig_hist.add_annotation(
+                x=dll_val, y=y_pos, xref="x", yref="paper",
+                text=label, showarrow=False,
+                font=dict(size=11, color=color, weight="bold"),
+                xanchor="left" if dll_val < x_mid else "right",
+                xshift=4 if dll_val < x_mid else -4,
+                yanchor="top",
             )
 
         fig_hist.update_layout(
