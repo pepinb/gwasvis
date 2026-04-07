@@ -36,13 +36,31 @@ class EnsemblRESTProvider:
 
 
 class LocalFastaProvider:
-    """Fetch reference sequence from a local FASTA file via pyfaidx."""
+    """Fetch reference sequence from local FASTA file(s) via pyfaidx.
+
+    Accepts either a single FASTA path or a directory containing
+    per-chromosome files named chr{N}.fa.
+    """
 
     def __init__(self, fasta_path: str):
+        import os
+
         from pyfaidx import Fasta
 
-        self._fasta = Fasta(fasta_path)
-        self._chroms = set(self._fasta.keys())
+        path = os.path.expanduser(fasta_path)
+        if os.path.isdir(path):
+            # Load all chr*.fa files from the directory
+            self._fastas: dict[str, Fasta] = {}
+            for f in sorted(os.listdir(path)):
+                if f.endswith(".fa") and f.startswith("chr"):
+                    fa = Fasta(os.path.join(path, f))
+                    for key in fa.keys():
+                        self._fastas[key] = fa
+        else:
+            fa = Fasta(path)
+            self._fastas = {key: fa for key in fa.keys()}
+
+        self._chroms = set(self._fastas.keys())
 
     def _normalize_chrom(self, chrom: str) -> str:
         if chrom in self._chroms:
@@ -55,4 +73,4 @@ class LocalFastaProvider:
     def fetch(self, chrom: str, start: int, end: int) -> str:
         chrom = self._normalize_chrom(chrom)
         # pyfaidx uses 0-based slicing; our API is 1-based inclusive
-        return str(self._fasta[chrom][start - 1 : end]).upper()
+        return str(self._fastas[chrom][chrom][start - 1 : end]).upper()
