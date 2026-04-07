@@ -1,12 +1,13 @@
-"""Score genome-wide null candidates with Evo2 1B.
+"""Score genome-wide null candidates with Evo2.
 
 Reads genome_null_candidates.parquet (built by build_genome_null.py),
 scores all ~6,400 biallelic SNVs via Modal parallel map, and saves
-scored results to genome_null_scored.parquet.
+scored results to genome_null_evo2_{model}.parquet.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -18,11 +19,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from evo2.client import Evo2Client
 from evo2.reference import LocalFastaProvider
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", default="1b", help="Evo2 model version (default: 1b)")
+args = parser.parse_args()
+MODEL = args.model
+
 ROOT = Path(__file__).resolve().parent.parent
 EVO2_DIR = ROOT / "data" / "evo2"
 REF_DIR = ROOT / "data" / "reference"
 CANDIDATES_PATH = EVO2_DIR / "genome_null_candidates.parquet"
-SCORED_PATH = EVO2_DIR / "genome_null_evo2_1b.parquet"
+SCORED_PATH = EVO2_DIR / f"genome_null_evo2_{MODEL}.parquet"
 
 print("=== Score Genome-Wide Null ===\n")
 

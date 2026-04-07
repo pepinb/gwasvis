@@ -14,4 +14,5 @@ data/evo2/*
 !data/evo2/genome_null_candidates.parquet
 !data/evo2/calibration_summary_*.csv
 !data/evo2/calibration_matched_*.csv
+!data/evo2/model_comparison_*.md
 data/reference/
