@@ -15,4 +15,6 @@ data/evo2/*
 !data/evo2/calibration_summary_*.csv
 !data/evo2/calibration_matched_*.csv
 !data/evo2/model_comparison_*.md
+!data/evo2/model_agreement_diagnostic.md
+!data/evo2/agreement_*.png
 data/reference/
