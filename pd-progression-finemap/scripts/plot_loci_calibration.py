@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -14,9 +15,14 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from loci import LOCI
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", default="1b", help="Evo2 model version (default: 1b)")
+args = parser.parse_args()
+MODEL = args.model
+
 ROOT = Path(__file__).resolve().parent.parent
 EVO2_DIR = ROOT / "data" / "evo2"
-SUMMARY_PATH = EVO2_DIR / "all_loci_summary.csv"
+SUMMARY_PATH = EVO2_DIR / f"calibration_summary_{MODEL}.csv"
 
 summary = pd.read_csv(SUMMARY_PATH)
 
@@ -26,7 +32,7 @@ print("Generating Figure A: small multiples histograms...")
 # Compute global x-axis range
 all_dlls = []
 for locus in LOCI:
-    cache = EVO2_DIR / f"{locus['name']}_{locus['trait']}_evo2.parquet"
+    cache = EVO2_DIR / f"{locus['name']}_{locus['trait']}_evo2_{MODEL}.parquet"
     if cache.exists():
         ldf = pd.read_parquet(cache)
         scored = ldf[ldf["error"] == ""]["delta_log_likelihood"]

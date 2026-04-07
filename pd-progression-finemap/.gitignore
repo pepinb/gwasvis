@@ -8,5 +8,10 @@ data/cache/
 __pycache__/
 *.pyc
 .venv/
-data/evo2/
+data/evo2/*
+!data/evo2/*_evo2_*.parquet
+!data/evo2/genome_null_evo2_*.parquet
+!data/evo2/genome_null_candidates.parquet
+!data/evo2/calibration_summary_*.csv
+!data/evo2/calibration_matched_*.csv
 data/reference/

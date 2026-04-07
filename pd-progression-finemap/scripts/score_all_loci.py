@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,11 @@ from pyfaidx import Fasta
 
 # Import locus definitions from the pipeline
 from loci import LOCI
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", default="1b", help="Evo2 model version (default: 1b)")
+args = parser.parse_args()
+MODEL = args.model
 
 ROOT = Path(__file__).resolve().parent.parent
 REF_DIR = ROOT / "data" / "reference"
@@ -52,7 +58,7 @@ for locus in LOCI:
     lead_rsid = locus["lead_rsid"]
 
     parquet_path = LOCI_DIR / f"{name}_{trait}.parquet"
-    cache_path = EVO2_DIR / f"{name}_{trait}_evo2.parquet"
+    cache_path = EVO2_DIR / f"{name}_{trait}_evo2_{MODEL}.parquet"
 
     print(f"\n{'='*60}")
     print(f"Locus: {name} ({trait}) — lead: {lead_rsid} chr{chrom}:{lead_pos}")
@@ -169,7 +175,7 @@ print(f"\n\nTotal scoring time: {total_elapsed:.1f}s")
 
 # ── Save summary ──────────────────────────────────────────────────────
 summary_df = pd.DataFrame(summary_rows)
-summary_path = EVO2_DIR / "all_loci_summary.csv"
+summary_path = EVO2_DIR / f"calibration_summary_{MODEL}.csv"
 summary_df.to_csv(summary_path, index=False)
 print(f"\nSaved summary to {summary_path}")
 

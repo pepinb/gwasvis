@@ -6,6 +6,7 @@ Figure B: Locus vs. genome-wide matched percentile comparison (dot plot)
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -18,10 +19,15 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from loci import LOCI
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", default="1b", help="Evo2 model version (default: 1b)")
+args = parser.parse_args()
+MODEL = args.model
+
 ROOT = Path(__file__).resolve().parent.parent
 EVO2_DIR = ROOT / "data" / "evo2"
-NULL_SCORED_PATH = EVO2_DIR / "genome_null_scored.parquet"
-MATCHED_PATH = EVO2_DIR / "matched_percentiles.csv"
+NULL_SCORED_PATH = EVO2_DIR / f"genome_null_evo2_{MODEL}.parquet"
+MATCHED_PATH = EVO2_DIR / f"calibration_matched_{MODEL}.csv"
 
 MAF_BINS = [
     (0.005, 0.01), (0.01, 0.02), (0.02, 0.05), (0.05, 0.10),

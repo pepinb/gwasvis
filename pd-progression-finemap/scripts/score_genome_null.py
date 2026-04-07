@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 EVO2_DIR = ROOT / "data" / "evo2"
 REF_DIR = ROOT / "data" / "reference"
 CANDIDATES_PATH = EVO2_DIR / "genome_null_candidates.parquet"
-SCORED_PATH = EVO2_DIR / "genome_null_scored.parquet"
+SCORED_PATH = EVO2_DIR / "genome_null_evo2_1b.parquet"
 
 print("=== Score Genome-Wide Null ===\n")
 
