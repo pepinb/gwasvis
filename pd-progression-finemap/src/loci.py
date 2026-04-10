@@ -35,13 +35,22 @@ _RSID_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 #   genome-wide significant  p < 5e-8
 #   suggestive               5e-8 <= p < 1e-6 (included for completeness)
 
+# hg38 coordinates were lifted from hg19 using pyliftover (hg19ToHg38.over.chain)
+# on 2026-04-07. All seven variants lifted successfully on + strand with no
+# ambiguity. Chain file source: UCSC hg19ToHg38.over.chain.gz (via pyliftover).
+# ref/alt alleles populated from the same GWAS replication work; SYT10 and
+# XPO1 were corrected from earlier placeholders during the eQTL phase.
+
 LOCI: list[dict] = [
     # ── Mortality (Table 2) ──────────────────────────────────────────────
     {
         "name": "APOE",
         "chr": "19",
         "lead_bp": 45411941,
+        "hg38_bp": 44908684,
         "lead_rsid": "rs429358",
+        "ref": "T",
+        "alt": "C",
         "trait": "mortality",
         "build": "hg19",
     },
@@ -49,8 +58,11 @@ LOCI: list[dict] = [
         "name": "TBXAS1",
         "chr": "7",
         "lead_bp": 139637422,
+        "hg38_bp": 139937623,
         "lead_rsid": "rs4726467",
         "lead_chrpos": "7:139637422",
+        "ref": "C",
+        "alt": "T",
         "trait": "mortality",
         "build": "hg19",
     },
@@ -58,8 +70,11 @@ LOCI: list[dict] = [
         "name": "SYT10",
         "chr": "12",
         "lead_bp": 33635494,
+        "hg38_bp": 33482559,
         "lead_rsid": "rs10437796",
         "lead_chrpos": "12:33635494",
+        "ref": "C",
+        "alt": "A",
         "trait": "mortality",
         "build": "hg19",
         "significance": "suggestive",
@@ -69,7 +84,10 @@ LOCI: list[dict] = [
         "name": "MORN1",
         "chr": "1",
         "lead_bp": 2315032,  # Ensembl GRCh37; paper Table 3 reported 2308517
+        "hg38_bp": 2383593,
         "lead_rsid": "rs115217673",
+        "ref": "G",
+        "alt": "A",
         "trait": "hy3",
         "build": "hg19",
     },
@@ -77,7 +95,10 @@ LOCI: list[dict] = [
         "name": "ASNS",
         "chr": "7",
         "lead_bp": 97470925,  # Ensembl GRCh37; paper Table 3 reported 97478547
+        "hg38_bp": 97841613,
         "lead_rsid": "rs145274312",
+        "ref": "G",
+        "alt": "A",
         "trait": "hy3",
         "build": "hg19",
     },
@@ -85,7 +106,10 @@ LOCI: list[dict] = [
         "name": "PDE5A",
         "chr": "4",
         "lead_bp": 120566153,  # Ensembl GRCh37; paper Table 3 reported 120416730
+        "hg38_bp": 119644998,
         "lead_rsid": "rs113120976",
+        "ref": "C",
+        "alt": "T",
         "trait": "hy3",
         "build": "hg19",
     },
@@ -93,11 +117,73 @@ LOCI: list[dict] = [
         "name": "XPO1",
         "chr": "2",
         "lead_bp": 61742356,  # Ensembl GRCh37; paper Table 3 reported 61709726
+        "hg38_bp": 61515221,
         "lead_rsid": "rs141421624",
+        "ref": "A",
+        "alt": "G",
         "trait": "hy3",
         "build": "hg19",
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Dataclass view of LOCI (for the eQTL embeddings phase and test_liftover.py)
+# ---------------------------------------------------------------------------
+# The fine-mapping pipeline (ld.py, finemap.py, evaluate.py, etc.) consumes
+# the dict-based LOCI above. The newer eQTL embeddings phase (src/eqtl/, the
+# extraction scripts, and tests/test_liftover.py) wants attribute access on a
+# frozen dataclass. We derive the dataclass tuple from the dict to keep the
+# two views in sync automatically.
+
+from dataclasses import dataclass as _dataclass  # noqa: E402
+
+
+@_dataclass(frozen=True)
+class Locus:
+    """Attribute-based view of a PD lead variant.
+
+    Fields mirror the columns added during the eQTL phase:
+      * ``chr`` is an int (for set-membership against held-out chromosomes)
+      * ``hg19_bp`` / ``hg38_bp`` are 1-based coordinates
+      * ``ref`` / ``alt`` are single-base alleles
+    """
+
+    name: str
+    chr: int
+    hg19_bp: int
+    hg38_bp: int
+    rsid: str
+    ref: str
+    alt: str
+    trait: str
+
+
+def _loci_to_objects(raw: list[dict]) -> tuple[Locus, ...]:
+    out: list[Locus] = []
+    for d in raw:
+        out.append(
+            Locus(
+                name=d["name"],
+                chr=int(d["chr"]),
+                hg19_bp=int(d["lead_bp"]),
+                hg38_bp=int(d["hg38_bp"]),
+                rsid=d["lead_rsid"],
+                ref=d["ref"],
+                alt=d["alt"],
+                trait=d["trait"],
+            )
+        )
+    return tuple(out)
+
+
+LOCI_OBJECTS: tuple[Locus, ...] = _loci_to_objects(LOCI)
+LOCI_BY_NAME: dict[str, Locus] = {l.name: l for l in LOCI_OBJECTS}
+LOCI_BY_RSID: dict[str, Locus] = {l.rsid: l for l in LOCI_OBJECTS}
+
+# Held-out chromosomes for eQTL probe training (so probes never see the
+# regions we evaluate on).
+PD_HOLDOUT_CHROMS: frozenset[int] = frozenset(l.chr for l in LOCI_OBJECTS)
 
 
 # ---------------------------------------------------------------------------

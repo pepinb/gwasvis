@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 EVO2_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "evo2"
+EQTL_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "eqtl"
 
 
 @st.cache_data
@@ -56,6 +57,30 @@ def load_calibration_matched(model: str = "1b") -> pd.DataFrame | None:
 def load_genome_null(model: str = "1b") -> pd.DataFrame | None:
     """Load the scored genome-wide null for the given model."""
     path = EVO2_DIR / f"genome_null_evo2_{model}.parquet"
+    if not path.exists():
+        return None
+    return pd.read_parquet(path)
+
+
+# ---------------------------------------------------------------------------
+# eQTL probe loaders (prompt 8B/8C)
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data
+def load_eqtl_probe_scorecard() -> pd.DataFrame | None:
+    """Load the per-locus eQTL probe scorecard written by
+    scripts/score_pd_loci_with_probes.py."""
+    path = EQTL_DIR / "probe_scorecard.csv"
+    if not path.exists():
+        return None
+    return pd.read_csv(path)
+
+
+@st.cache_data
+def load_eqtl_probe_locus(locus: str, trait: str) -> pd.DataFrame | None:
+    """Load per-variant eQTL probe scores for one PD locus."""
+    path = EQTL_DIR / "locus_scores" / f"{locus}_{trait}_eqtl_probes.parquet"
     if not path.exists():
         return None
     return pd.read_parquet(path)

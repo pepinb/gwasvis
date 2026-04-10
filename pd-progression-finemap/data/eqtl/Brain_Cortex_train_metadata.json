@@ -1,0 +1,44 @@
+{
+  "tissue": "Brain_Cortex",
+  "construction_date": "2026-04-07T23:03:24.750637+00:00",
+  "n_positives": 1107,
+  "n_negatives": 1107,
+  "n_dropped_no_match": 48,
+  "n_dropped_no_maf_pos": 344,
+  "n_dropped_no_tss_pos": 0,
+  "n_dropped_no_maf_bg": 88859,
+  "label_balance": "1107/1107",
+  "maf_source": "GTEx v8 signif_variant_gene_pairs",
+  "maf_source_url": "https://storage.googleapis.com/adult-gtex/bulk-qtl/v8/single-tissue-cis-qtl/GTEx_Analysis_v8_eQTL.tar",
+  "gencode_version": "v26",
+  "gencode_url": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_26/gencode.v26.annotation.gtf.gz",
+  "maf_bin_boundaries": [
+    0.005,
+    0.01,
+    0.02,
+    0.05,
+    0.1,
+    0.2,
+    0.3,
+    0.4,
+    0.5
+  ],
+  "tss_bin_boundaries_bp": [
+    0,
+    1000,
+    5000,
+    25000,
+    100000,
+    1000000
+  ],
+  "held_out_chromosomes": [
+    1,
+    2,
+    4,
+    7,
+    12,
+    19
+  ],
+  "random_seed": 42,
+  "source_dapg_file": "/Users/brian/Desktop/gwasdemo/data/eqtl/raw/Brain_Cortex.variants_pip.txt.gz"
+}
