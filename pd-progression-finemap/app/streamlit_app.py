@@ -1463,11 +1463,6 @@ def view_eqtl_probe() -> None:
 
     # --- Comparison vs 7B likelihood ensemble -------------------------------
     st.subheader("Comparison to likelihood scoring")
-    st.caption(
-        "Does the embedding probe add information over the existing 7B "
-        "likelihood ensemble? Rows where any probe percentile differs from "
-        "the likelihood percentile by more than 30 points are highlighted."
-    )
 
     matched_ens = load_calibration_matched("ensemble")
     if matched_ens is None or matched_ens.empty:
@@ -1484,52 +1479,84 @@ def view_eqtl_probe() -> None:
         st.dataframe(cmp_view, use_container_width=True, hide_index=True)
         return
 
+    # Loci that are not eQTL test cases (coding variants etc.) — flag with
+    # a footnote rather than counting "embeddings added info" normally.
+    _CODING_FOOTNOTE_LOCI = {"APOE"}
+
     merged = display.merge(
         matched_ens[["locus", "null_percentile_signed", "null_percentile_abs"]],
         on="locus",
         how="left",
-    )
-    merged = merged.rename(columns={"null_percentile_abs": "7B |delta| %ile"})
+    ).rename(columns={
+        "null_percentile_signed": "7B matched %ile",
+        "null_percentile_abs": "7B |delta| %ile",
+    })
 
-    def _flag(row):
-        ll = row.get("7B |delta| %ile")
-        if pd.isna(ll):
-            return False
+    def _flag(row) -> str:
+        """Compare probe percentiles against the MATCHED (signed) baseline.
+
+        The signed/matched null is the metric that originally placed TBXAS1
+        at ~47 pct and motivated the embeddings phase — so that's the right
+        baseline for "did embeddings add information".
+        """
+        matched = row.get("7B matched %ile")
+        if pd.isna(matched):
+            return "--"
         wb = row.get("wb_lead_percentile")
         bc = row.get("bc_lead_percentile")
-        return (
-            (pd.notna(wb) and abs(wb - ll) > 30)
-            or (pd.notna(bc) and abs(bc - ll) > 30)
+        diverges = (
+            (pd.notna(wb) and abs(wb - matched) > 30)
+            or (pd.notna(bc) and abs(bc - matched) > 30)
         )
+        if row["locus"] in _CODING_FOOTNOTE_LOCI:
+            return "yes\u2020" if diverges else "no\u2020"
+        return "yes" if diverges else "no"
 
-    merged["differs >30"] = merged.apply(_flag, axis=1)
+    merged["embeddings add info?"] = merged.apply(_flag, axis=1)
+
+    # Decorate the locus label with a footnote marker for coding-variant loci
+    merged["locus_display"] = merged["locus"].apply(
+        lambda loc: f"{loc}\u2020" if loc in _CODING_FOOTNOTE_LOCI else loc
+    )
+
     cmp_view = merged[[
-        "locus",
+        "locus_display",
         "lead rsID",
+        "7B matched %ile",
         "7B |delta| %ile",
         "wb_lead_percentile",
         "bc_lead_percentile",
-        "differs >30",
+        "embeddings add info?",
     ]].rename(columns={
+        "locus_display": "locus",
         "wb_lead_percentile": "blood probe %ile",
         "bc_lead_percentile": "brain probe %ile",
     })
 
     def _cmp_style(row):
-        if row["differs >30"]:
+        val = str(row["embeddings add info?"]).rstrip("\u2020")
+        if val == "yes":
             return ["background-color: #fff3cd"] * len(row)
         return [""] * len(row)
 
     styled_cmp = cmp_view.style.apply(_cmp_style, axis=1).format({
+        "7B matched %ile": "{:.1f}",
         "7B |delta| %ile": "{:.1f}",
         "blood probe %ile": "{:.1f}",
         "brain probe %ile": "{:.1f}",
     })
     st.dataframe(styled_cmp, use_container_width=True, hide_index=True)
     st.caption(
-        "7B |delta| %ile = magnitude of ensemble delta-log-likelihood "
-        "ranked against MAF-matched genomic variants. Probe %ile = rank "
-        "of the paper lead's probe probability within its own locus."
+        "**Matched %ile** is the signed test from the existing Evo 2 tab — the "
+        "null metric that motivated the embeddings phase (TBXAS1 sits at ~49 "
+        "pct here, which is why scalar likelihood scoring could not flag it). "
+        "**|delta| %ile** is the magnitude test, shown for reference. Rows "
+        "where either probe percentile differs from the matched %ile by more "
+        "than 30 points are highlighted as cases where embeddings added "
+        "information beyond scalar likelihood scoring. "
+        "\u2020 APOE is a coding variant, not an eQTL test case; its "
+        "matched/probe disagreement reflects that categorical difference "
+        "rather than embeddings adding eQTL information."
     )
 
 
