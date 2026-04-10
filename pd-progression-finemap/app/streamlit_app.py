@@ -20,6 +20,8 @@ from evo2.load import (
     list_available_models,
     load_calibration_matched,
     load_calibration_summary,
+    load_eqtl_probe_locus,
+    load_eqtl_probe_scorecard,
     load_evo2_scores,
     load_genome_null,
 )
@@ -1210,6 +1212,328 @@ def view_benchmark() -> None:
 
 
 # ---------------------------------------------------------------------------
+# eQTL probe view (prompt 8C)
+# ---------------------------------------------------------------------------
+
+
+def _tier_label(pct: float | None) -> str:
+    if pct is None or pd.isna(pct):
+        return "--"
+    if pct >= 95:
+        return "STRONG"
+    if pct >= 80:
+        return "MODERATE"
+    if pct >= 50:
+        return "WEAK"
+    return "NONE"
+
+
+def _pct_color(pct: float | None) -> str:
+    """Background color for a percentile cell."""
+    if pct is None or pd.isna(pct):
+        return "#ffffff"
+    if pct >= 90:
+        return "#2e7d32"  # green
+    if pct >= 75:
+        return "#a5d6a7"  # light green
+    if pct >= 50:
+        return "#fff59d"  # yellow
+    return "#ef9a9a"  # red
+
+
+def _interpret(wb_pct: float, bc_pct: float) -> str:
+    wb_t = _tier_label(wb_pct)
+    bc_t = _tier_label(bc_pct)
+    if wb_t in ("STRONG", "MODERATE") and bc_t in ("STRONG", "MODERATE"):
+        return "Dual-tissue signal"
+    if wb_t in ("STRONG", "MODERATE"):
+        return "Blood-specific signal"
+    if bc_t in ("STRONG", "MODERATE"):
+        return "Brain-specific signal"
+    return "No strong probe signal"
+
+
+def view_eqtl_probe() -> None:
+    """Render the eQTL Probe tab."""
+    st.markdown(
+        "Evo 2 7B embeddings at layer `blocks.26` are used as features for a "
+        "logistic regression probe trained to distinguish fine-mapped eQTLs "
+        "(GTEx v8 DAP-G, PIP > 0.5) from matched non-eQTL controls. Probes "
+        "are trained per tissue on chromosomes **other than** the PD locus "
+        "chromosomes, then applied to the seven PD progression lead variants "
+        "as an out-of-distribution test. Higher locus percentiles indicate "
+        "the probe thinks the variant is more likely to be a regulatory "
+        "eQTL in that tissue."
+    )
+
+    scorecard = load_eqtl_probe_scorecard()
+    if scorecard is None or scorecard.empty:
+        st.error(
+            "No probe scorecard found at `data/eqtl/probe_scorecard.csv`. "
+            "Run `scripts/score_pd_loci_with_probes.py`."
+        )
+        return
+
+    # --- Summary table with paper rsIDs substituted in ----------------------
+    display = scorecard.copy()
+    paper_rsid = {k: v.get("rsid", "") for k, v in _PAPER_LEADS.items()}
+    display["lead rsID"] = display["locus"].map(paper_rsid)
+    display["interpretation"] = [
+        _interpret(r["wb_lead_percentile"], r["bc_lead_percentile"])
+        for _, r in display.iterrows()
+    ]
+
+    summary_view = display[[
+        "locus",
+        "trait",
+        "lead rsID",
+        "paper_eqtl_status",
+        "wb_lead_percentile",
+        "bc_lead_percentile",
+        "interpretation",
+    ]].rename(columns={
+        "paper_eqtl_status": "paper eQTL status",
+        "wb_lead_percentile": "blood %ile",
+        "bc_lead_percentile": "brain %ile",
+    })
+
+    def _row_style(row):
+        styles = [""] * len(row)
+        wb_idx = list(row.index).index("blood %ile")
+        bc_idx = list(row.index).index("brain %ile")
+        styles[wb_idx] = f"background-color: {_pct_color(row['blood %ile'])}"
+        styles[bc_idx] = f"background-color: {_pct_color(row['brain %ile'])}"
+        return styles
+
+    styled = (
+        summary_view.style
+        .apply(_row_style, axis=1)
+        .format({"blood %ile": "{:.1f}", "brain %ile": "{:.1f}"})
+    )
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.caption(
+        "Cell color: \U0001f7e2 \u226595 or \u226590 \u00b7 "
+        "\U0001f7e2 (light) 75-90 \u00b7 \U0001f7e1 50-75 \u00b7 \U0001f534 <50"
+    )
+
+    st.divider()
+
+    # --- Locus drilldown ----------------------------------------------------
+    loci_available = list(display["locus"])
+    default_idx = loci_available.index("TBXAS1") if "TBXAS1" in loci_available else 0
+    selected = st.selectbox(
+        "Locus drilldown", loci_available, index=default_idx, key="eqtl_drilldown"
+    )
+    sel_row = display[display["locus"] == selected].iloc[0]
+    sel_trait = sel_row["trait"]
+
+    locus_df = load_eqtl_probe_locus(selected, sel_trait)
+    if locus_df is None or locus_df.empty:
+        st.warning(
+            f"No per-variant parquet found for {selected}_{sel_trait}. "
+            "Run `scripts/score_pd_loci_with_probes.py`."
+        )
+        return
+
+    lead = locus_df[locus_df["is_paper_lead"]]
+    if lead.empty:
+        st.warning("Paper lead row not found in this locus's parquet.")
+        return
+    lead_row = lead.iloc[0]
+    paper_rsid_str = paper_rsid.get(selected, lead_row["rsid"])
+
+    col1, col2 = st.columns(2)
+
+    # Panel 1 — blood histogram
+    with col1:
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=locus_df["wb_prob"],
+            nbinsx=40,
+            marker_color="#4a90d9",
+            name="Locus variants",
+        ))
+        fig.add_vline(
+            x=float(lead_row["wb_prob"]),
+            line=dict(color="red", width=2),
+            annotation_text=(
+                f"{paper_rsid_str}<br>pct={lead_row['wb_percentile']:.1f}"
+            ),
+            annotation_position="top right",
+        )
+        fig.update_layout(
+            title="Whole_Blood probe probability",
+            xaxis_title="probe P(eQTL)",
+            yaxis_title="n variants",
+            height=360,
+            margin=dict(l=40, r=20, t=50, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Panel 2 — brain histogram
+    with col2:
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=locus_df["bc_prob"],
+            nbinsx=40,
+            marker_color="#9b59b6",
+            name="Locus variants",
+        ))
+        fig.add_vline(
+            x=float(lead_row["bc_prob"]),
+            line=dict(color="red", width=2),
+            annotation_text=(
+                f"{paper_rsid_str}<br>pct={lead_row['bc_percentile']:.1f}"
+            ),
+            annotation_position="top right",
+        )
+        fig.update_layout(
+            title="Brain_Cortex probe probability",
+            xaxis_title="probe P(eQTL)",
+            yaxis_title="n variants",
+            height=360,
+            margin=dict(l=40, r=20, t=50, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    col3, col4 = st.columns([3, 2])
+
+    # Panel 3 — scatter blood vs brain, colored by distance to lead
+    with col3:
+        bg = locus_df[~locus_df["is_paper_lead"]]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=bg["wb_prob"],
+            y=bg["bc_prob"],
+            mode="markers",
+            marker=dict(
+                size=6,
+                color=bg["distance_to_lead_hg38"].abs(),
+                colorscale="Viridis",
+                colorbar=dict(title="|dist to lead| (bp)", thickness=12, len=0.6),
+                line=dict(width=0.3, color="white"),
+            ),
+            text=bg["rsid"],
+            hovertemplate=(
+                "%{text}<br>wb=%{x:.3f}<br>bc=%{y:.3f}<extra></extra>"
+            ),
+            name="Locus variants",
+        ))
+        fig.add_trace(go.Scatter(
+            x=[float(lead_row["wb_prob"])],
+            y=[float(lead_row["bc_prob"])],
+            mode="markers",
+            marker=dict(size=20, symbol="star", color="red",
+                        line=dict(width=2, color="red")),
+            text=[paper_rsid_str],
+            hovertemplate="%{text}<br>wb=%{x:.3f}<br>bc=%{y:.3f}<extra></extra>",
+            name="Paper lead",
+        ))
+        fig.update_layout(
+            title="Blood probe vs Brain probe",
+            xaxis_title="Whole_Blood P(eQTL)",
+            yaxis_title="Brain_Cortex P(eQTL)",
+            height=420,
+            margin=dict(l=40, r=20, t=50, b=40),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Panel 4 — paper annotation + interpretation box
+    with col4:
+        st.markdown(f"### {selected} — {paper_rsid_str}")
+        st.markdown(f"**Paper eQTL annotation:** {sel_row['paper_eqtl_status']}")
+        st.markdown(
+            f"**Blood probe:** P={lead_row['wb_prob']:.3f}, "
+            f"percentile={lead_row['wb_percentile']:.1f} "
+            f"(tier **{sel_row['wb_tier']}**)"
+        )
+        st.markdown(
+            f"**Brain probe:** P={lead_row['bc_prob']:.3f}, "
+            f"percentile={lead_row['bc_percentile']:.1f} "
+            f"(tier **{sel_row['bc_tier']}**)"
+        )
+        st.markdown(f"**Verdict:** {sel_row['interpretation']}")
+        st.caption(
+            f"Locus {sel_row['chrom']}:{sel_row['hg38_bp']} (hg38) \u00b7 "
+            f"{sel_row['n_variants']} variants scored"
+        )
+
+    st.divider()
+
+    # --- Comparison vs 7B likelihood ensemble -------------------------------
+    st.subheader("Comparison to likelihood scoring")
+    st.caption(
+        "Does the embedding probe add information over the existing 7B "
+        "likelihood ensemble? Rows where any probe percentile differs from "
+        "the likelihood percentile by more than 30 points are highlighted."
+    )
+
+    matched_ens = load_calibration_matched("ensemble")
+    if matched_ens is None or matched_ens.empty:
+        st.info(
+            "No `data/evo2/calibration_matched_ensemble.csv` found — showing "
+            "probe results only."
+        )
+        cmp_view = display[[
+            "locus", "lead rsID", "wb_lead_percentile", "bc_lead_percentile"
+        ]].rename(columns={
+            "wb_lead_percentile": "blood probe %ile",
+            "bc_lead_percentile": "brain probe %ile",
+        })
+        st.dataframe(cmp_view, use_container_width=True, hide_index=True)
+        return
+
+    merged = display.merge(
+        matched_ens[["locus", "null_percentile_signed", "null_percentile_abs"]],
+        on="locus",
+        how="left",
+    )
+    merged = merged.rename(columns={"null_percentile_abs": "7B |delta| %ile"})
+
+    def _flag(row):
+        ll = row.get("7B |delta| %ile")
+        if pd.isna(ll):
+            return False
+        wb = row.get("wb_lead_percentile")
+        bc = row.get("bc_lead_percentile")
+        return (
+            (pd.notna(wb) and abs(wb - ll) > 30)
+            or (pd.notna(bc) and abs(bc - ll) > 30)
+        )
+
+    merged["differs >30"] = merged.apply(_flag, axis=1)
+    cmp_view = merged[[
+        "locus",
+        "lead rsID",
+        "7B |delta| %ile",
+        "wb_lead_percentile",
+        "bc_lead_percentile",
+        "differs >30",
+    ]].rename(columns={
+        "wb_lead_percentile": "blood probe %ile",
+        "bc_lead_percentile": "brain probe %ile",
+    })
+
+    def _cmp_style(row):
+        if row["differs >30"]:
+            return ["background-color: #fff3cd"] * len(row)
+        return [""] * len(row)
+
+    styled_cmp = cmp_view.style.apply(_cmp_style, axis=1).format({
+        "7B |delta| %ile": "{:.1f}",
+        "blood probe %ile": "{:.1f}",
+        "brain probe %ile": "{:.1f}",
+    })
+    st.dataframe(styled_cmp, use_container_width=True, hide_index=True)
+    st.caption(
+        "7B |delta| %ile = magnitude of ensemble delta-log-likelihood "
+        "ranked against MAF-matched genomic variants. Probe %ile = rank "
+        "of the paper lead's probe probability within its own locus."
+    )
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
@@ -1250,8 +1574,14 @@ def main() -> None:
         )
 
     # -- Tabs ------------------------------------------------------------------
-    tab_detail, tab_evo2, tab_calibration, tab_benchmark = st.tabs(
-        ["Locus Detail", "Evo 2", "Calibration", "Benchmark"]
+    (
+        tab_detail,
+        tab_evo2,
+        tab_calibration,
+        tab_benchmark,
+        tab_eqtl,
+    ) = st.tabs(
+        ["Locus Detail", "Evo 2", "Calibration", "Benchmark", "eQTL Probe"]
     )
 
     with tab_detail:
@@ -1265,6 +1595,9 @@ def main() -> None:
 
     with tab_benchmark:
         view_benchmark()
+
+    with tab_eqtl:
+        view_eqtl_probe()
 
 
 if __name__ == "__main__":
