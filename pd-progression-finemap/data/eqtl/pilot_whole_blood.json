@@ -1,0 +1,126 @@
+{
+  "tissue": "Whole_Blood",
+  "model": "evo2_7b",
+  "layer": "blocks.26",
+  "pool_window": 128,
+  "assembly": "hg38",
+  "n_sampled": 100,
+  "n_positive": 50,
+  "n_negative": 50,
+  "sampled_chromosomes": [
+    "chr14",
+    "chr15",
+    "chr16",
+    "chr17",
+    "chr18",
+    "chr20",
+    "chr21",
+    "chr22"
+  ],
+  "label_balance": {
+    "1": 50,
+    "0": 50
+  },
+  "pilot_chroms": [
+    "chr14",
+    "chr15",
+    "chr16",
+    "chr17",
+    "chr18",
+    "chr20",
+    "chr21",
+    "chr22"
+  ],
+  "seed": 42,
+  "cv_folds": 5,
+  "Cs": [
+    0.001,
+    0.01,
+    0.1,
+    1.0,
+    10.0,
+    100.0
+  ],
+  "hidden_dim": 4096,
+  "n_failures": 0,
+  "failures": [],
+  "cache_hits_at_start": 100,
+  "modal_calls_made": 0,
+  "extract_seconds": 0.119232177734375,
+  "total_runtime_seconds": 1.722717046737671,
+  "subvector_l2_distances": {
+    "ref_fwd_vs_ref_rc": 0.9898090362548828,
+    "ref_fwd_vs_alt_fwd": 0.07507108896970749,
+    "alt_fwd_vs_alt_rc": 0.9903417229652405,
+    "ref_rc_vs_alt_rc": 0.0751890316605568
+  },
+  "concat": {
+    "feature_shape": [
+      100,
+      16384
+    ],
+    "order": [
+      "ref_fwd",
+      "ref_rc",
+      "alt_fwd",
+      "alt_rc"
+    ],
+    "best_C": 0.001,
+    "mean_cv_auroc": 0.518,
+    "std_cv_auroc": 0.07025667228100119,
+    "per_fold_auroc": [
+      0.42000000000000004,
+      0.5499999999999999,
+      0.6000000000000001,
+      0.44999999999999996,
+      0.57
+    ],
+    "cross_val_score_refit": [
+      0.42000000000000004,
+      0.5499999999999999,
+      0.6000000000000001,
+      0.44999999999999996,
+      0.57
+    ],
+    "verdict": "diagnostic"
+  },
+  "delta": {
+    "feature_shape": [
+      100,
+      8192
+    ],
+    "order": [
+      "alt_fwd - ref_fwd",
+      "alt_rc - ref_rc"
+    ],
+    "best_C": 10.0,
+    "mean_cv_auroc": 0.592,
+    "std_cv_auroc": 0.041665333311999286,
+    "per_fold_auroc": [
+      0.52,
+      0.6,
+      0.6499999999999999,
+      0.59,
+      0.6
+    ],
+    "cross_val_score_refit": [
+      0.52,
+      0.59,
+      0.6499999999999999,
+      0.59,
+      0.6
+    ],
+    "verdict": "PASS gate"
+  },
+  "pass_criteria": {
+    "delta_mean_cv_auroc_gt_0_55": true,
+    "delta_std_cv_auroc_lt_0_20": true,
+    "n_failures_eq_0": true,
+    "subvectors_distinct": true
+  },
+  "pass_construction": "delta",
+  "passed": true,
+  "note": "Concat is reported for diagnostic purposes only. At n=100 a linear probe cannot learn the implicit ref->alt subtraction in 16384-D space, so delta features gate the pilot PASS. Prompt 7 will re-evaluate both constructions at the full n=4854 Whole_Blood scale, where the Evo 2 paper shows concat is sufficient (BRCA1 classifier @ n~3100 -> 0.94).",
+  "git_commit": "fe5fc6174e3fc26aea6f98adb2f2bec00e4c8f2c",
+  "timestamp": "2026-04-09T03:41:11.288071+00:00"
+}
