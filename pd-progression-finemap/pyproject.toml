@@ -18,6 +18,7 @@ dependencies = [
     "matplotlib",
     "joblib>=1.5.3",
     "scikit-learn>=1.8.0",
+    "pyliftover>=0.4.1",
 ]
 
 [dependency-groups]

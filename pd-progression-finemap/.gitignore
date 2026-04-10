@@ -19,6 +19,7 @@ data/evo2/*
 !data/evo2/agreement_*.png
 data/reference/
 data/reference_hg38/
+data/reference_hg38
 
 # eQTL embeddings phase — large raw/derived data, keep only probes + metadata
 data/eqtl/raw/
@@ -30,3 +31,7 @@ data/gtex/
 !data/eqtl/*_metadata.json
 !data/eqtl/pilot_whole_blood.json
 !data/eqtl/extraction_summary.json
+!data/eqtl/probe_scorecard.csv
+!data/eqtl/locus_scores/
+!data/eqtl/locus_scores/*.parquet
+!data/eqtl/locus_scores/extraction_failures.txt
